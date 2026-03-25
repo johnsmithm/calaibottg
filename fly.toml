@@ -1,0 +1,17 @@
+app = "calorie-tracker-bot"
+primary_region = "iad"
+
+[build]
+
+[env]
+  PYTHONUNBUFFERED = "1"
+
+[[services]]
+  protocol = "tcp"
+  internal_port = 8080
+
+  [[services.ports]]
+    port = 80
+
+[processes]
+  app = "python bot.py"

@@ -1,0 +1,1346 @@
+import os
+import logging
+from datetime import datetime, timedelta
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    MessageHandler,
+    CallbackQueryHandler,
+    ConversationHandler,
+    ContextTypes,
+    filters,
+)
+from dotenv import load_dotenv
+import speech_recognition as sr
+from pydub import AudioSegment
+import tempfile
+
+from database import Database
+from ai_analyzer import AIAnalyzer
+from calorie_calculator import calculate_daily_calorie_target
+from reminder_scheduler import ReminderScheduler
+
+# Load environment variables
+load_dotenv()
+
+# Enable logging
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
+# Initialize components
+db = Database()
+ai = AIAnalyzer()
+
+# Conversation states
+NAME, HEIGHT, WEIGHT, GOAL, GOAL_SPEED, BREAKFAST_TIME, LUNCH_TIME, DINNER_TIME = range(8)
+
+# User data storage for onboarding
+user_onboarding_data = {}
+
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Start command - begins user onboarding"""
+    user_id = update.effective_user.id
+
+    # Check if user exists
+    user = db.get_user(user_id)
+
+    if user:
+        await update.message.reply_text(
+            f"Welcome back, {user['name']}! 👋\n\n"
+            "Send me a photo of your meal, voice message, or text description to track it.\n\n"
+            "Commands:\n"
+            "/stats - View your statistics\n"
+            "/settings - Update your profile\n"
+            "/help - Get help"
+        )
+        return ConversationHandler.END
+
+    # Start onboarding
+    await update.message.reply_text(
+        "👋 Welcome to Calorie Tracker Bot!\n\n"
+        "I'll help you track your nutrition and reach your goals.\n\n"
+        "Let's get started! What's your name?"
+    )
+    return NAME
+
+
+async def get_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Get user's name"""
+    user_id = update.effective_user.id
+    name = update.message.text.strip()
+
+    user_onboarding_data[user_id] = {'name': name}
+
+    await update.message.reply_text(
+        f"Nice to meet you, {name}! 😊\n\n"
+        "What's your height in cm?"
+    )
+    return HEIGHT
+
+
+async def get_height(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Get user's height"""
+    user_id = update.effective_user.id
+
+    try:
+        height = float(update.message.text.strip())
+        user_onboarding_data[user_id]['height'] = height
+
+        await update.message.reply_text(
+            "Great! What's your current weight in kg?"
+        )
+        return WEIGHT
+    except ValueError:
+        await update.message.reply_text(
+            "Please enter a valid number for height (e.g., 175)"
+        )
+        return HEIGHT
+
+
+async def get_weight(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Get user's weight"""
+    user_id = update.effective_user.id
+
+    try:
+        weight = float(update.message.text.strip())
+        user_onboarding_data[user_id]['weight'] = weight
+
+        keyboard = [
+            [InlineKeyboardButton("Lose Weight", callback_data="goal_lose_weight")],
+            [InlineKeyboardButton("Gain Weight", callback_data="goal_gain_weight")],
+            [InlineKeyboardButton("Maintain Weight", callback_data="goal_maintain")],
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await update.message.reply_text(
+            "What's your goal?",
+            reply_markup=reply_markup
+        )
+        return GOAL
+    except ValueError:
+        await update.message.reply_text(
+            "Please enter a valid number for weight (e.g., 70)"
+        )
+        return WEIGHT
+
+
+async def get_goal(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Get user's goal"""
+    query = update.callback_query
+    await query.answer()
+
+    user_id = query.from_user.id
+    goal = query.data.replace('goal_', '')
+    user_onboarding_data[user_id]['goal'] = goal
+
+    if goal == 'maintain':
+        # Skip goal speed for maintain
+        await query.edit_message_text(
+            "Great! What time do you usually eat breakfast? (e.g., 08:00 or 8am)"
+        )
+        return BREAKFAST_TIME
+
+    keyboard = [
+        [InlineKeyboardButton("Slow (0.25 kg/week)", callback_data="speed_slow")],
+        [InlineKeyboardButton("Moderate (0.5 kg/week)", callback_data="speed_moderate")],
+        [InlineKeyboardButton("Fast (0.75 kg/week)", callback_data="speed_fast")],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await query.edit_message_text(
+        "How fast do you want to reach your goal?",
+        reply_markup=reply_markup
+    )
+    return GOAL_SPEED
+
+
+async def get_goal_speed(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Get user's goal speed"""
+    query = update.callback_query
+    await query.answer()
+
+    user_id = query.from_user.id
+    goal_speed = query.data.replace('speed_', '')
+    user_onboarding_data[user_id]['goal_speed'] = goal_speed
+
+    await query.edit_message_text(
+        "Perfect! What time do you usually eat breakfast? (e.g., 08:00 or 8am)"
+    )
+    return BREAKFAST_TIME
+
+
+def parse_time(time_str):
+    """Parse time string to HH:MM format"""
+    time_str = time_str.strip().lower().replace(' ', '')
+
+    # Handle formats like 8am, 8:30pm, 08:00, 20:30
+    if 'am' in time_str or 'pm' in time_str:
+        is_pm = 'pm' in time_str
+        time_str = time_str.replace('am', '').replace('pm', '')
+
+        if ':' in time_str:
+            hour, minute = time_str.split(':')
+        else:
+            hour = time_str
+            minute = '00'
+
+        hour = int(hour)
+        if is_pm and hour != 12:
+            hour += 12
+        elif not is_pm and hour == 12:
+            hour = 0
+
+        return f"{hour:02d}:{minute}"
+    else:
+        if ':' in time_str:
+            parts = time_str.split(':')
+            return f"{int(parts[0]):02d}:{parts[1]}"
+        else:
+            return f"{int(time_str):02d}:00"
+
+
+async def get_breakfast_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Get breakfast time"""
+    user_id = update.effective_user.id
+
+    try:
+        time_str = update.message.text.strip()
+        breakfast_time = parse_time(time_str)
+        user_onboarding_data[user_id]['breakfast_time'] = breakfast_time
+
+        await update.message.reply_text(
+            "Got it! What time do you usually eat lunch? (e.g., 13:00 or 1pm)"
+        )
+        return LUNCH_TIME
+    except:
+        await update.message.reply_text(
+            "Please enter a valid time (e.g., 08:00 or 8am)"
+        )
+        return BREAKFAST_TIME
+
+
+async def get_lunch_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Get lunch time"""
+    user_id = update.effective_user.id
+
+    try:
+        time_str = update.message.text.strip()
+        lunch_time = parse_time(time_str)
+        user_onboarding_data[user_id]['lunch_time'] = lunch_time
+
+        await update.message.reply_text(
+            "Almost done! What time do you usually eat dinner? (e.g., 19:00 or 7pm)"
+        )
+        return DINNER_TIME
+    except:
+        await update.message.reply_text(
+            "Please enter a valid time (e.g., 13:00 or 1pm)"
+        )
+        return LUNCH_TIME
+
+
+async def get_dinner_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Get dinner time and complete onboarding"""
+    user_id = update.effective_user.id
+
+    try:
+        time_str = update.message.text.strip()
+        dinner_time = parse_time(time_str)
+        user_onboarding_data[user_id]['dinner_time'] = dinner_time
+
+        # Calculate daily calorie target
+        data = user_onboarding_data[user_id]
+        goal_speed = data.get('goal_speed', 'moderate')
+
+        daily_calories = calculate_daily_calorie_target(
+            weight=data['weight'],
+            height=data['height'],
+            goal=data['goal'],
+            goal_speed=goal_speed
+        )
+
+        # Save user to database
+        db.create_user(
+            user_id=user_id,
+            name=data['name'],
+            height=data['height'],
+            weight=data['weight'],
+            goal=data['goal'],
+            goal_speed=goal_speed,
+            daily_calorie_target=daily_calories
+        )
+
+        # Save meal times
+        db.set_meal_time(user_id, 'breakfast', data['breakfast_time'])
+        db.set_meal_time(user_id, 'lunch', data['lunch_time'])
+        db.set_meal_time(user_id, 'dinner', data['dinner_time'])
+
+        # Clear onboarding data
+        del user_onboarding_data[user_id]
+
+        await update.message.reply_text(
+            f"✅ All set, {data['name']}!\n\n"
+            f"📊 Your daily calorie target: {daily_calories} kcal\n\n"
+            f"🔔 Reminders:\n"
+            f"• Breakfast: {data['breakfast_time']}\n"
+            f"• Lunch: {data['lunch_time']}\n"
+            f"• Dinner: {data['dinner_time']}\n\n"
+            "📸 Send me a photo of your meal to get started!\n"
+            "🎤 You can also send voice messages or text descriptions.\n\n"
+            "Use /help to see all commands."
+        )
+
+        return ConversationHandler.END
+    except:
+        await update.message.reply_text(
+            "Please enter a valid time (e.g., 19:00 or 7pm)"
+        )
+        return DINNER_TIME
+
+
+async def cancel_onboarding(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Cancel onboarding"""
+    user_id = update.effective_user.id
+    if user_id in user_onboarding_data:
+        del user_onboarding_data[user_id]
+
+    await update.message.reply_text(
+        "Onboarding cancelled. Use /start to begin again."
+    )
+    return ConversationHandler.END
+
+
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle photo uploads"""
+    user_id = update.effective_user.id
+
+    # Check if user exists
+    user = db.get_user(user_id)
+    if not user:
+        await update.message.reply_text(
+            "Please complete onboarding first with /start"
+        )
+        return
+
+    await update.message.reply_text("🔍 Analyzing your meal...")
+
+    try:
+        # Download photo
+        photo_file = await update.message.photo[-1].get_file()
+
+        # Create photos directory if it doesn't exist
+        os.makedirs('photos', exist_ok=True)
+
+        # Save photo
+        photo_path = f"photos/{user_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
+        await photo_file.download_to_drive(photo_path)
+
+        # Analyze with AI
+        meal_data = ai.analyze_food_image(photo_path)
+        meal_data['image_path'] = photo_path
+
+        # Save to pending meals
+        db.save_pending_meal(user_id, meal_data)
+
+        # Send results with save/cancel buttons
+        keyboard = [
+            [InlineKeyboardButton("✅ Save", callback_data="save_meal")],
+            [InlineKeyboardButton("❌ Cancel", callback_data="cancel_meal")],
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await update.message.reply_text(
+            f"📊 *Nutritional Information:*\n\n"
+            f"🍽 {meal_data['description']}\n"
+            f"🍴 Meal Type: {meal_data['meal_type'].title()}\n\n"
+            f"⚡️ Calories: {meal_data['calories']} kcal\n"
+            f"🥩 Protein: {meal_data['protein']}g\n"
+            f"🍞 Carbs: {meal_data['carbs']}g\n"
+            f"🥑 Fat: {meal_data['fat']}g\n"
+            f"🌾 Fiber: {meal_data['fiber']}g\n"
+            f"🍬 Sugar: {meal_data['sugar']}g\n\n"
+            f"Save this meal?",
+            parse_mode='Markdown',
+            reply_markup=reply_markup
+        )
+
+    except Exception as e:
+        logger.error(f"Error analyzing photo: {e}")
+        await update.message.reply_text(
+            "❌ Sorry, I couldn't analyze this image. Please try again."
+        )
+
+
+async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle voice messages"""
+    user_id = update.effective_user.id
+
+    # Check if user exists
+    user = db.get_user(user_id)
+    if not user:
+        await update.message.reply_text(
+            "Please complete onboarding first with /start"
+        )
+        return
+
+    await update.message.reply_text("🎤 Processing your voice message...")
+
+    try:
+        # Download voice file
+        voice_file = await update.message.voice.get_file()
+
+        # Create voice directory if it doesn't exist
+        os.makedirs('voice', exist_ok=True)
+
+        # Save voice file
+        voice_path = f"voice/{user_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.ogg"
+        await voice_file.download_to_drive(voice_path)
+
+        # Convert to WAV for speech recognition
+        audio = AudioSegment.from_ogg(voice_path)
+        wav_path = voice_path.replace('.ogg', '.wav')
+        audio.export(wav_path, format="wav")
+
+        # Transcribe
+        recognizer = sr.Recognizer()
+        with sr.AudioFile(wav_path) as source:
+            audio_data = recognizer.record(source)
+            text = recognizer.recognize_google(audio_data)
+
+        # Clean up
+        os.remove(voice_path)
+        os.remove(wav_path)
+
+        # Use AI to understand intent (same as text handler)
+        intent = ai.parse_user_intent(text, user)
+
+        # Handle different intents (similar to text handler)
+        if intent['action'] == 'get_stats':
+            # Redirect to text handler logic
+            period = intent.get('period', 'day')
+            now = datetime.now()
+
+            if period == 'day':
+                start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+                end = start + timedelta(days=1)
+                period_name = "Today"
+            elif period == 'week':
+                start = now - timedelta(days=now.weekday())
+                start = start.replace(hour=0, minute=0, second=0, microsecond=0)
+                end = start + timedelta(days=7)
+                period_name = "This Week"
+            elif period == 'month':
+                start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+                if now.month == 12:
+                    end = start.replace(year=now.year+1, month=1)
+                else:
+                    end = start.replace(month=now.month+1)
+                period_name = "This Month"
+            else:
+                start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+                end = start + timedelta(days=1)
+                period_name = "Today"
+
+            stats = db.get_stats(user_id, start, end)
+
+            if not stats or stats['meal_count'] == 0:
+                await update.message.reply_text(f"📝 I heard: \"{text}\"\n\nNo meals recorded for {period_name.lower()}.")
+                return
+
+            total_cals = stats['total_calories'] or 0
+            message = (
+                f"📝 I heard: \"{text}\"\n\n"
+                f"📊 *{period_name} Statistics*\n\n"
+                f"🍽 Meals: {stats['meal_count']}\n"
+                f"⚡️ Total calories: {int(total_cals)} kcal\n"
+                f"🥩 Protein: {int(stats['total_protein'] or 0)}g\n"
+                f"🍞 Carbs: {int(stats['total_carbs'] or 0)}g\n"
+                f"🥑 Fat: {int(stats['total_fat'] or 0)}g"
+            )
+            await update.message.reply_text(message, parse_mode='Markdown')
+            return
+
+        elif intent['action'] == 'get_profile':
+            message = (
+                f"📝 I heard: \"{text}\"\n\n"
+                f"👤 *Your Profile*\n\n"
+                f"📛 Name: {user['name']}\n"
+                f"⚖️ Weight: {user['weight']} kg\n"
+                f"📏 Height: {user['height']} cm\n"
+                f"🎯 Goal: {user['goal'].replace('_', ' ').title()}\n"
+                f"🍽 Daily Target: {int(user['daily_calorie_target'])} kcal"
+            )
+            await update.message.reply_text(message, parse_mode='Markdown')
+            return
+
+        # Otherwise, treat as meal logging
+        meal_data = ai.analyze_text_meal(text)
+
+        # Save to pending meals
+        db.save_pending_meal(user_id, meal_data)
+
+        # Send results with save/cancel buttons
+        keyboard = [
+            [InlineKeyboardButton("✅ Save", callback_data="save_meal")],
+            [InlineKeyboardButton("❌ Cancel", callback_data="cancel_meal")],
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await update.message.reply_text(
+            f"📝 I heard: \"{text}\"\n\n"
+            f"📊 *Nutritional Information:*\n\n"
+            f"🍽 {meal_data['description']}\n"
+            f"🍴 Meal Type: {meal_data['meal_type'].title()}\n\n"
+            f"⚡️ Calories: {meal_data['calories']} kcal\n"
+            f"🥩 Protein: {meal_data['protein']}g\n"
+            f"🍞 Carbs: {meal_data['carbs']}g\n"
+            f"🥑 Fat: {meal_data['fat']}g\n"
+            f"🌾 Fiber: {meal_data['fiber']}g\n"
+            f"🍬 Sugar: {meal_data['sugar']}g\n\n"
+            f"Save this meal?",
+            parse_mode='Markdown',
+            reply_markup=reply_markup
+        )
+
+    except Exception as e:
+        logger.error(f"Error processing voice: {e}")
+        await update.message.reply_text(
+            "❌ Sorry, I couldn't process your voice message. Please try again."
+        )
+
+
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle text messages"""
+    user_id = update.effective_user.id
+    text = update.message.text
+
+    # Check if user exists
+    user = db.get_user(user_id)
+    if not user:
+        await update.message.reply_text(
+            "Please complete onboarding first with /start"
+        )
+        return
+
+    # Use AI to understand user intent
+    intent = ai.parse_user_intent(text, user)
+
+    # Handle different intents
+    if intent['action'] == 'get_stats':
+        # Get stats based on AI-determined period
+        period = intent.get('period', 'day')
+
+        now = datetime.now()
+        if period == 'day':
+            start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            end = start + timedelta(days=1)
+            period_name = "Today"
+        elif period == 'week':
+            start = now - timedelta(days=now.weekday())
+            start = start.replace(hour=0, minute=0, second=0, microsecond=0)
+            end = start + timedelta(days=7)
+            period_name = "This Week"
+        elif period == 'month':
+            start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+            if now.month == 12:
+                end = start.replace(year=now.year+1, month=1)
+            else:
+                end = start.replace(month=now.month+1)
+            period_name = "This Month"
+        elif period == 'year':
+            start = now.replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
+            end = start.replace(year=now.year+1)
+            period_name = "This Year"
+        else:
+            start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            end = start + timedelta(days=1)
+            period_name = "Today"
+
+        stats = db.get_stats(user_id, start, end)
+
+        if not stats or stats['meal_count'] == 0:
+            await update.message.reply_text(f"No meals recorded for {period_name.lower()}.")
+            return
+
+        total_cals = stats['total_calories'] or 0
+        total_protein = stats['total_protein'] or 0
+        total_carbs = stats['total_carbs'] or 0
+        total_fat = stats['total_fat'] or 0
+        total_fiber = stats['total_fiber'] or 0
+        total_sugar = stats['total_sugar'] or 0
+        avg_cals = stats['avg_calories'] or 0
+        meal_count = stats['meal_count']
+
+        message = (
+            f"📊 *{period_name} Statistics*\n\n"
+            f"🍽 Meals logged: {meal_count}\n"
+            f"⚡️ Total calories: {int(total_cals)} kcal\n"
+            f"📈 Average per meal: {int(avg_cals)} kcal\n\n"
+            f"*Macros:*\n"
+            f"🥩 Protein: {int(total_protein)}g\n"
+            f"🍞 Carbs: {int(total_carbs)}g\n"
+            f"🥑 Fat: {int(total_fat)}g\n"
+            f"🌾 Fiber: {int(total_fiber)}g\n"
+            f"🍬 Sugar: {int(total_sugar)}g\n\n"
+        )
+
+        if period == 'day':
+            target = user['daily_calorie_target']
+            remaining = target - total_cals
+            message += f"🎯 Daily target: {int(target)} kcal\n"
+            message += f"📊 Remaining: {int(remaining)} kcal"
+
+        await update.message.reply_text(message, parse_mode='Markdown')
+        return
+
+    elif intent['action'] == 'get_profile':
+        # Show user profile
+        message = (
+            f"👤 *Your Profile*\n\n"
+            f"📛 Name: {user['name']}\n"
+            f"📏 Height: {user['height']} cm\n"
+            f"⚖️ Weight: {user['weight']} kg\n"
+            f"🎯 Goal: {user['goal'].replace('_', ' ').title()}\n"
+            f"⚡️ Goal Speed: {user['goal_speed'].title()}\n"
+            f"🍽 Daily Calorie Target: {int(user['daily_calorie_target'])} kcal\n\n"
+        )
+
+        meal_times = db.get_meal_times(user_id)
+        if meal_times:
+            message += "🔔 *Meal Reminders:*\n"
+            for meal_type, meal_time in meal_times.items():
+                message += f"• {meal_type.title()}: {meal_time}\n"
+
+        await update.message.reply_text(message, parse_mode='Markdown')
+        return
+
+    elif intent['action'] == 'update_setting' and intent['confidence'] > 0.7:
+        field = intent['field']
+        value = intent['value']
+
+        # Update user setting
+        if field == 'weight':
+            db.update_user(user_id, weight=value)
+            # Recalculate calorie target
+            new_target = calculate_daily_calorie_target(
+                weight=value,
+                height=user['height'],
+                goal=user['goal'],
+                goal_speed=user['goal_speed']
+            )
+            db.update_user(user_id, daily_calorie_target=new_target)
+            await update.message.reply_text(
+                f"✅ Updated weight to {value}kg\n"
+                f"📊 New daily calorie target: {new_target} kcal"
+            )
+        elif field == 'height':
+            db.update_user(user_id, height=value)
+            new_target = calculate_daily_calorie_target(
+                weight=user['weight'],
+                height=value,
+                goal=user['goal'],
+                goal_speed=user['goal_speed']
+            )
+            db.update_user(user_id, daily_calorie_target=new_target)
+            await update.message.reply_text(
+                f"✅ Updated height to {value}cm\n"
+                f"📊 New daily calorie target: {new_target} kcal"
+            )
+        elif field == 'goal':
+            db.update_user(user_id, goal=value)
+            new_target = calculate_daily_calorie_target(
+                weight=user['weight'],
+                height=user['height'],
+                goal=value,
+                goal_speed=user['goal_speed']
+            )
+            db.update_user(user_id, daily_calorie_target=new_target)
+            await update.message.reply_text(
+                f"✅ Updated goal to {value.replace('_', ' ')}\n"
+                f"📊 New daily calorie target: {new_target} kcal"
+            )
+        elif field == 'goal_speed':
+            db.update_user(user_id, goal_speed=value)
+            new_target = calculate_daily_calorie_target(
+                weight=user['weight'],
+                height=user['height'],
+                goal=user['goal'],
+                goal_speed=value
+            )
+            db.update_user(user_id, daily_calorie_target=new_target)
+            await update.message.reply_text(
+                f"✅ Updated goal speed to {value}\n"
+                f"📊 New daily calorie target: {new_target} kcal"
+            )
+        return
+
+    elif intent['action'] == 'update_meal_time' and intent['confidence'] > 0.7:
+        field = intent['field']
+        value = intent['value']
+
+        meal_type = field.replace('_time', '')
+        db.set_meal_time(user_id, meal_type, value)
+        await update.message.reply_text(
+            f"✅ Updated {meal_type} reminder to {value}"
+        )
+        return
+
+    elif intent['action'] == 'log_meal':
+        # Treat as meal description
+        await update.message.reply_text("🔍 Analyzing your meal...")
+
+        try:
+            meal_data = ai.analyze_text_meal(text)
+
+            # Save to pending meals
+            db.save_pending_meal(user_id, meal_data)
+
+            # Send results with save/cancel buttons
+            keyboard = [
+                [InlineKeyboardButton("✅ Save", callback_data="save_meal")],
+                [InlineKeyboardButton("❌ Cancel", callback_data="cancel_meal")],
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+
+            await update.message.reply_text(
+                f"📊 *Nutritional Information:*\n\n"
+                f"🍽 {meal_data['description']}\n"
+                f"🍴 Meal Type: {meal_data['meal_type'].title()}\n\n"
+                f"⚡️ Calories: {meal_data['calories']} kcal\n"
+                f"🥩 Protein: {meal_data['protein']}g\n"
+                f"🍞 Carbs: {meal_data['carbs']}g\n"
+                f"🥑 Fat: {meal_data['fat']}g\n"
+                f"🌾 Fiber: {meal_data['fiber']}g\n"
+                f"🍬 Sugar: {meal_data['sugar']}g\n\n"
+                f"Save this meal?",
+                parse_mode='Markdown',
+                reply_markup=reply_markup
+            )
+
+        except Exception as e:
+            logger.error(f"Error analyzing text: {e}")
+            await update.message.reply_text(
+                "❌ Sorry, I couldn't understand that. Try:\n"
+                "• Sending a photo of your meal\n"
+                "• Describing your meal in detail\n"
+                "• Asking for stats: 'show my stats'\n"
+                "• Asking about your profile: 'what's my info?'\n"
+                "• Updating settings: 'change my weight to 75kg'"
+            )
+    else:
+        # Default: assume they want to log a meal
+        await update.message.reply_text("🔍 Analyzing your meal...")
+
+        try:
+            meal_data = ai.analyze_text_meal(text)
+
+            # Save to pending meals
+            db.save_pending_meal(user_id, meal_data)
+
+            # Send results with save/cancel buttons
+            keyboard = [
+                [InlineKeyboardButton("✅ Save", callback_data="save_meal")],
+                [InlineKeyboardButton("❌ Cancel", callback_data="cancel_meal")],
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+
+            await update.message.reply_text(
+                f"📊 *Nutritional Information:*\n\n"
+                f"🍽 {meal_data['description']}\n"
+                f"🍴 Meal Type: {meal_data['meal_type'].title()}\n\n"
+                f"⚡️ Calories: {meal_data['calories']} kcal\n"
+                f"🥩 Protein: {meal_data['protein']}g\n"
+                f"🍞 Carbs: {meal_data['carbs']}g\n"
+                f"🥑 Fat: {meal_data['fat']}g\n"
+                f"🌾 Fiber: {meal_data['fiber']}g\n"
+                f"🍬 Sugar: {meal_data['sugar']}g\n\n"
+                f"Save this meal?",
+                parse_mode='Markdown',
+                reply_markup=reply_markup
+            )
+
+        except Exception as e:
+            logger.error(f"Error analyzing text: {e}")
+            await update.message.reply_text(
+                "❌ Sorry, I couldn't understand that. Try:\n"
+                "• Sending a photo of your meal\n"
+                "• Describing your meal in detail\n"
+                "• Asking for stats: 'show my stats'\n"
+                "• Asking about your profile: 'what's my info?'\n"
+                "• Updating settings: 'change my weight to 75kg'"
+            )
+
+
+async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle button callbacks"""
+    query = update.callback_query
+    await query.answer()
+
+    user_id = query.from_user.id
+
+    if query.data == 'save_meal':
+        # Get pending meal
+        meal = db.get_pending_meal(user_id)
+
+        if meal:
+            # Save to meals
+            db.save_meal(user_id, meal)
+            db.delete_pending_meal(user_id)
+
+            # Get user's daily progress
+            user = db.get_user(user_id)
+            today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+            today_end = today_start + timedelta(days=1)
+
+            stats = db.get_stats(user_id, today_start, today_end)
+
+            total_cals = stats['total_calories'] or 0
+            remaining = user['daily_calorie_target'] - total_cals
+
+            await query.edit_message_text(
+                f"✅ Meal saved!\n\n"
+                f"📊 Today's Progress:\n"
+                f"Consumed: {int(total_cals)} / {int(user['daily_calorie_target'])} kcal\n"
+                f"Remaining: {int(remaining)} kcal"
+            )
+        else:
+            await query.edit_message_text("❌ No pending meal found.")
+
+    elif query.data == 'cancel_meal':
+        db.delete_pending_meal(user_id)
+        await query.edit_message_text("❌ Meal cancelled.")
+
+    elif query.data == 'confirm_reset':
+        # Delete all user data
+        conn = db.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('DELETE FROM meals WHERE user_id = ?', (user_id,))
+        cursor.execute('DELETE FROM meal_times WHERE user_id = ?', (user_id,))
+        cursor.execute('DELETE FROM pending_meals WHERE user_id = ?', (user_id,))
+        cursor.execute('DELETE FROM users WHERE user_id = ?', (user_id,))
+        conn.commit()
+        conn.close()
+
+        await query.edit_message_text(
+            "✅ All data has been reset.\n\n"
+            "Use /start to set up your profile again."
+        )
+
+    elif query.data == 'cancel_reset':
+        await query.edit_message_text("❌ Reset cancelled. Your data is safe.")
+
+
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show statistics"""
+    user_id = update.effective_user.id
+
+    user = db.get_user(user_id)
+    if not user:
+        await update.message.reply_text("Please complete onboarding first with /start")
+        return
+
+    # Get period from command args
+    args = context.args
+    period = args[0] if args else 'day'
+
+    now = datetime.now()
+
+    if period == 'day':
+        start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        end = start + timedelta(days=1)
+        period_name = "Today"
+    elif period == 'week':
+        start = now - timedelta(days=now.weekday())
+        start = start.replace(hour=0, minute=0, second=0, microsecond=0)
+        end = start + timedelta(days=7)
+        period_name = "This Week"
+    elif period == 'month':
+        start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        if now.month == 12:
+            end = start.replace(year=now.year+1, month=1)
+        else:
+            end = start.replace(month=now.month+1)
+        period_name = "This Month"
+    elif period == 'year':
+        start = now.replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
+        end = start.replace(year=now.year+1)
+        period_name = "This Year"
+    else:
+        await update.message.reply_text(
+            "Usage: /stats [day|week|month|year]\n"
+            "Example: /stats week"
+        )
+        return
+
+    stats = db.get_stats(user_id, start, end)
+
+    if not stats or stats['meal_count'] == 0:
+        await update.message.reply_text(f"No meals recorded for {period_name.lower()}.")
+        return
+
+    total_cals = stats['total_calories'] or 0
+    total_protein = stats['total_protein'] or 0
+    total_carbs = stats['total_carbs'] or 0
+    total_fat = stats['total_fat'] or 0
+    total_fiber = stats['total_fiber'] or 0
+    total_sugar = stats['total_sugar'] or 0
+    avg_cals = stats['avg_calories'] or 0
+    meal_count = stats['meal_count']
+
+    message = (
+        f"📊 *{period_name} Statistics*\n\n"
+        f"🍽 Meals logged: {meal_count}\n"
+        f"⚡️ Total calories: {int(total_cals)} kcal\n"
+        f"📈 Average per meal: {int(avg_cals)} kcal\n\n"
+        f"*Macros:*\n"
+        f"🥩 Protein: {int(total_protein)}g\n"
+        f"🍞 Carbs: {int(total_carbs)}g\n"
+        f"🥑 Fat: {int(total_fat)}g\n"
+        f"🌾 Fiber: {int(total_fiber)}g\n"
+        f"🍬 Sugar: {int(total_sugar)}g\n\n"
+    )
+
+    if period == 'day':
+        target = user['daily_calorie_target']
+        remaining = target - total_cals
+        message += f"🎯 Daily target: {int(target)} kcal\n"
+        message += f"📊 Remaining: {int(remaining)} kcal"
+
+    await update.message.reply_text(message, parse_mode='Markdown')
+
+
+async def today_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show today's statistics"""
+    user_id = update.effective_user.id
+    user = db.get_user(user_id)
+    if not user:
+        await update.message.reply_text("Please complete onboarding first with /start")
+        return
+
+    now = datetime.now()
+    start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    end = start + timedelta(days=1)
+
+    stats = db.get_stats(user_id, start, end)
+
+    if not stats or stats['meal_count'] == 0:
+        await update.message.reply_text("No meals recorded today.")
+        return
+
+    total_cals = stats['total_calories'] or 0
+    target = user['daily_calorie_target']
+    remaining = target - total_cals
+
+    message = (
+        f"📊 *Today's Statistics*\n\n"
+        f"🍽 Meals logged: {stats['meal_count']}\n"
+        f"⚡️ Calories: {int(total_cals)} / {int(target)} kcal\n"
+        f"📊 Remaining: {int(remaining)} kcal\n\n"
+        f"*Macros:*\n"
+        f"🥩 Protein: {int(stats['total_protein'] or 0)}g\n"
+        f"🍞 Carbs: {int(stats['total_carbs'] or 0)}g\n"
+        f"🥑 Fat: {int(stats['total_fat'] or 0)}g\n"
+        f"🌾 Fiber: {int(stats['total_fiber'] or 0)}g\n"
+        f"🍬 Sugar: {int(stats['total_sugar'] or 0)}g"
+    )
+
+    await update.message.reply_text(message, parse_mode='Markdown')
+
+
+async def week_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show this week's statistics"""
+    user_id = update.effective_user.id
+    user = db.get_user(user_id)
+    if not user:
+        await update.message.reply_text("Please complete onboarding first with /start")
+        return
+
+    now = datetime.now()
+    start = now - timedelta(days=now.weekday())
+    start = start.replace(hour=0, minute=0, second=0, microsecond=0)
+    end = start + timedelta(days=7)
+
+    stats = db.get_stats(user_id, start, end)
+
+    if not stats or stats['meal_count'] == 0:
+        await update.message.reply_text("No meals recorded this week.")
+        return
+
+    message = (
+        f"📊 *This Week's Statistics*\n\n"
+        f"🍽 Meals logged: {stats['meal_count']}\n"
+        f"⚡️ Total calories: {int(stats['total_calories'] or 0)} kcal\n"
+        f"📈 Avg per meal: {int(stats['avg_calories'] or 0)} kcal\n\n"
+        f"*Macros:*\n"
+        f"🥩 Protein: {int(stats['total_protein'] or 0)}g\n"
+        f"🍞 Carbs: {int(stats['total_carbs'] or 0)}g\n"
+        f"🥑 Fat: {int(stats['total_fat'] or 0)}g\n"
+        f"🌾 Fiber: {int(stats['total_fiber'] or 0)}g\n"
+        f"🍬 Sugar: {int(stats['total_sugar'] or 0)}g"
+    )
+
+    await update.message.reply_text(message, parse_mode='Markdown')
+
+
+async def month_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show this month's statistics"""
+    user_id = update.effective_user.id
+    user = db.get_user(user_id)
+    if not user:
+        await update.message.reply_text("Please complete onboarding first with /start")
+        return
+
+    now = datetime.now()
+    start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    if now.month == 12:
+        end = start.replace(year=now.year+1, month=1)
+    else:
+        end = start.replace(month=now.month+1)
+
+    stats = db.get_stats(user_id, start, end)
+
+    if not stats or stats['meal_count'] == 0:
+        await update.message.reply_text("No meals recorded this month.")
+        return
+
+    message = (
+        f"📊 *This Month's Statistics*\n\n"
+        f"🍽 Meals logged: {stats['meal_count']}\n"
+        f"⚡️ Total calories: {int(stats['total_calories'] or 0)} kcal\n"
+        f"📈 Avg per meal: {int(stats['avg_calories'] or 0)} kcal\n\n"
+        f"*Macros:*\n"
+        f"🥩 Protein: {int(stats['total_protein'] or 0)}g\n"
+        f"🍞 Carbs: {int(stats['total_carbs'] or 0)}g\n"
+        f"🥑 Fat: {int(stats['total_fat'] or 0)}g\n"
+        f"🌾 Fiber: {int(stats['total_fiber'] or 0)}g\n"
+        f"🍬 Sugar: {int(stats['total_sugar'] or 0)}g"
+    )
+
+    await update.message.reply_text(message, parse_mode='Markdown')
+
+
+async def year_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show this year's statistics"""
+    user_id = update.effective_user.id
+    user = db.get_user(user_id)
+    if not user:
+        await update.message.reply_text("Please complete onboarding first with /start")
+        return
+
+    now = datetime.now()
+    start = now.replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
+    end = start.replace(year=now.year+1)
+
+    stats = db.get_stats(user_id, start, end)
+
+    if not stats or stats['meal_count'] == 0:
+        await update.message.reply_text("No meals recorded this year.")
+        return
+
+    message = (
+        f"📊 *This Year's Statistics*\n\n"
+        f"🍽 Meals logged: {stats['meal_count']}\n"
+        f"⚡️ Total calories: {int(stats['total_calories'] or 0)} kcal\n"
+        f"📈 Avg per meal: {int(stats['avg_calories'] or 0)} kcal\n\n"
+        f"*Macros:*\n"
+        f"🥩 Protein: {int(stats['total_protein'] or 0)}g\n"
+        f"🍞 Carbs: {int(stats['total_carbs'] or 0)}g\n"
+        f"🥑 Fat: {int(stats['total_fat'] or 0)}g\n"
+        f"🌾 Fiber: {int(stats['total_fiber'] or 0)}g\n"
+        f"🍬 Sugar: {int(stats['total_sugar'] or 0)}g"
+    )
+
+    await update.message.reply_text(message, parse_mode='Markdown')
+
+
+async def profile_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show user profile"""
+    user_id = update.effective_user.id
+    user = db.get_user(user_id)
+    if not user:
+        await update.message.reply_text("Please complete onboarding first with /start")
+        return
+
+    message = (
+        f"👤 *Your Profile*\n\n"
+        f"📛 Name: {user['name']}\n"
+        f"📏 Height: {user['height']} cm\n"
+        f"⚖️ Weight: {user['weight']} kg\n"
+        f"🎯 Goal: {user['goal'].replace('_', ' ').title()}\n"
+        f"⚡️ Goal Speed: {user['goal_speed'].title()}\n"
+        f"🍽 Daily Calorie Target: {int(user['daily_calorie_target'])} kcal\n\n"
+    )
+
+    meal_times = db.get_meal_times(user_id)
+    if meal_times:
+        message += "🔔 *Meal Reminders:*\n"
+        for meal_type, meal_time in meal_times.items():
+            message += f"• {meal_type.title()}: {meal_time}\n"
+
+    await update.message.reply_text(message, parse_mode='Markdown')
+
+
+async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show recent meal history"""
+    user_id = update.effective_user.id
+    user = db.get_user(user_id)
+    if not user:
+        await update.message.reply_text("Please complete onboarding first with /start")
+        return
+
+    now = datetime.now()
+    start = now - timedelta(days=7)
+
+    meals = db.get_meals_by_date_range(user_id, start, now)
+
+    if not meals:
+        await update.message.reply_text("No recent meals found.")
+        return
+
+    message = "📜 *Recent Meals (Last 7 Days)*\n\n"
+
+    for meal in meals[:10]:  # Show last 10 meals
+        eaten_at = datetime.fromisoformat(meal['eaten_at'])
+        message += (
+            f"🍽 {meal['description'][:40]}...\n"
+            f"   ⚡️ {int(meal['calories'])} kcal | "
+            f"🥩 {int(meal['protein'])}g | "
+            f"🍞 {int(meal['carbs'])}g\n"
+            f"   📅 {eaten_at.strftime('%b %d, %I:%M %p')}\n\n"
+        )
+
+    if len(meals) > 10:
+        message += f"_...and {len(meals) - 10} more meals_"
+
+    await update.message.reply_text(message, parse_mode='Markdown')
+
+
+async def delete_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Delete last logged meal"""
+    user_id = update.effective_user.id
+    user = db.get_user(user_id)
+    if not user:
+        await update.message.reply_text("Please complete onboarding first with /start")
+        return
+
+    # Get most recent meal
+    now = datetime.now()
+    start = now - timedelta(days=1)
+    meals = db.get_meals_by_date_range(user_id, start, now)
+
+    if not meals:
+        await update.message.reply_text("No recent meals to delete.")
+        return
+
+    # Delete the most recent meal
+    last_meal = meals[0]
+    conn = db.get_connection()
+    cursor = conn.cursor()
+    cursor.execute('DELETE FROM meals WHERE id = ?', (last_meal['id'],))
+    conn.commit()
+    conn.close()
+
+    await update.message.reply_text(
+        f"✅ Deleted last meal:\n"
+        f"{last_meal['description']}\n"
+        f"({int(last_meal['calories'])} kcal)"
+    )
+
+
+async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Reset user data and start over"""
+    user_id = update.effective_user.id
+
+    keyboard = [
+        [InlineKeyboardButton("✅ Yes, reset everything", callback_data="confirm_reset")],
+        [InlineKeyboardButton("❌ Cancel", callback_data="cancel_reset")],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await update.message.reply_text(
+        "⚠️ *Warning*\n\n"
+        "This will delete all your data:\n"
+        "• Profile settings\n"
+        "• All logged meals\n"
+        "• Meal reminders\n\n"
+        "Are you sure?",
+        parse_mode='Markdown',
+        reply_markup=reply_markup
+    )
+
+
+async def progress_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show progress towards daily goal"""
+    user_id = update.effective_user.id
+    user = db.get_user(user_id)
+    if not user:
+        await update.message.reply_text("Please complete onboarding first with /start")
+        return
+
+    now = datetime.now()
+    start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    end = start + timedelta(days=1)
+
+    stats = db.get_stats(user_id, start, end)
+
+    total_cals = stats['total_calories'] or 0 if stats else 0
+    target = user['daily_calorie_target']
+    remaining = target - total_cals
+    percentage = (total_cals / target * 100) if target > 0 else 0
+
+    # Create progress bar
+    bar_length = 20
+    filled = int(bar_length * percentage / 100)
+    bar = "█" * filled + "░" * (bar_length - filled)
+
+    message = (
+        f"📈 *Daily Progress*\n\n"
+        f"{bar} {percentage:.1f}%\n\n"
+        f"⚡️ Consumed: {int(total_cals)} kcal\n"
+        f"🎯 Target: {int(target)} kcal\n"
+        f"📊 Remaining: {int(remaining)} kcal\n\n"
+    )
+
+    if remaining < 0:
+        message += f"⚠️ You're {int(abs(remaining))} kcal over your target!"
+    elif remaining < 200:
+        message += "✅ Almost there! Great job!"
+    else:
+        message += f"💪 Keep going! {int(remaining)} kcal to go!"
+
+    await update.message.reply_text(message, parse_mode='Markdown')
+
+
+async def reminders_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show and manage meal reminders"""
+    user_id = update.effective_user.id
+    user = db.get_user(user_id)
+    if not user:
+        await update.message.reply_text("Please complete onboarding first with /start")
+        return
+
+    meal_times = db.get_meal_times(user_id)
+
+    if not meal_times:
+        await update.message.reply_text(
+            "No meal reminders set.\n\n"
+            "Set them with commands like:\n"
+            "• Set breakfast reminder to 8am\n"
+            "• Update lunch time to 1pm"
+        )
+        return
+
+    message = "🔔 *Your Meal Reminders*\n\n"
+    for meal_type, meal_time in meal_times.items():
+        message += f"• {meal_type.title()}: {meal_time}\n"
+
+    message += (
+        "\n💡 *Change reminders:*\n"
+        "Just type naturally:\n"
+        "• 'Set breakfast to 7:30am'\n"
+        "• 'Change lunch time to 12:30'"
+    )
+
+    await update.message.reply_text(message, parse_mode='Markdown')
+
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show help message"""
+    help_text = (
+        "🤖 *Calorie Tracker Bot Help*\n\n"
+        "*📸 Tracking Meals:*\n"
+        "• Send a photo of your meal\n"
+        "• Send a voice message\n"
+        "• Type a meal description\n\n"
+        "*⚡️ Quick Commands:*\n"
+        "/today - Today's stats\n"
+        "/week - This week's stats\n"
+        "/month - This month's stats\n"
+        "/year - This year's stats\n"
+        "/progress - Daily progress bar\n"
+        "/profile - Your profile info\n"
+        "/history - Recent meals\n"
+        "/reminders - Meal reminders\n"
+        "/delete - Delete last meal\n"
+        "/reset - Reset all data\n"
+        "/help - Show this message\n\n"
+        "*💬 Natural Language:*\n"
+        "Just type naturally:\n"
+        "• 'Show my stats'\n"
+        "• 'What's my weight?'\n"
+        "• 'Change my weight to 75kg'\n"
+        "• 'Set breakfast to 8am'"
+    )
+
+    await update.message.reply_text(help_text, parse_mode='Markdown')
+
+
+def main():
+    """Start the bot"""
+    # Create application with longer timeouts
+    application = (
+        Application.builder()
+        .token(os.getenv('TELEGRAM_BOT_TOKEN'))
+        .read_timeout(30)
+        .write_timeout(30)
+        .connect_timeout(30)
+        .pool_timeout(30)
+        .build()
+    )
+
+    # Onboarding conversation handler
+    conv_handler = ConversationHandler(
+        entry_points=[CommandHandler('start', start)],
+        states={
+            NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_name)],
+            HEIGHT: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_height)],
+            WEIGHT: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_weight)],
+            GOAL: [CallbackQueryHandler(get_goal, pattern='^goal_')],
+            GOAL_SPEED: [CallbackQueryHandler(get_goal_speed, pattern='^speed_')],
+            BREAKFAST_TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_breakfast_time)],
+            LUNCH_TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_lunch_time)],
+            DINNER_TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_dinner_time)],
+        },
+        fallbacks=[CommandHandler('cancel', cancel_onboarding)],
+    )
+
+    application.add_handler(conv_handler)
+
+    # Command handlers
+    application.add_handler(CommandHandler('today', today_command))
+    application.add_handler(CommandHandler('week', week_command))
+    application.add_handler(CommandHandler('month', month_command))
+    application.add_handler(CommandHandler('year', year_command))
+    application.add_handler(CommandHandler('profile', profile_command))
+    application.add_handler(CommandHandler('history', history_command))
+    application.add_handler(CommandHandler('delete', delete_command))
+    application.add_handler(CommandHandler('reset', reset_command))
+    application.add_handler(CommandHandler('progress', progress_command))
+    application.add_handler(CommandHandler('reminders', reminders_command))
+    application.add_handler(CommandHandler('stats', stats_command))
+    application.add_handler(CommandHandler('help', help_command))
+
+    # Message handlers
+    application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    application.add_handler(MessageHandler(filters.VOICE, handle_voice))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+
+    # Button callback handler
+    application.add_handler(CallbackQueryHandler(button_callback))
+
+    # Start reminder scheduler
+    scheduler = ReminderScheduler(application.bot, db)
+    scheduler.start()
+
+    # Start bot
+    logger.info("Bot started!")
+    application.run_polling()
+
+
+if __name__ == '__main__':
+    main()
