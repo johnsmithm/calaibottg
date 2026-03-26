@@ -1,6 +1,7 @@
 import os
 import logging
 import re
+import html
 from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -1676,7 +1677,8 @@ async def seealluserstats_command(update: Update, context: ContextTypes.DEFAULT_
         await update.message.reply_text("No users found.")
         return
 
-    message = "👥 *ALL USERS STATISTICS*\n\n"
+    # Use HTML so /approve_1 can be a tap-to-run command link
+    message = "👥 <b>ALL USERS STATISTICS</b>\n\n"
 
     total_users = len(users)
     approved_users = len([u for u in users if u.get('is_approved', 0) == 1])
@@ -1696,20 +1698,21 @@ async def seealluserstats_command(update: Update, context: ContextTypes.DEFAULT_
     approved_list = [u for u in users if u.get('is_approved', 0) == 1]
 
     if pending_approval:
-        message += f"⏳ *PENDING APPROVAL* ({len(pending_approval)})\n"
+        message += f"⏳ <b>PENDING APPROVAL</b> ({len(pending_approval)})\n"
         for i, user in enumerate(pending_approval[:50], start=1):
-            username = user.get('username', 'unknown')
-            name = user.get('name', '')
-            message += f"{i}) *@{username}* ({name}) — `/approve_{i}`\n"
+            username = html.escape(user.get('username', 'unknown') or 'unknown')
+            name = html.escape(user.get('name', '') or '')
+            cmd_link = f'<a href="tg://bot_command?command=approve_{i}">/approve_{i}</a>'
+            message += f"{i}) @{username} ({name}) — {cmd_link}\n"
         if len(pending_approval) > 50:
-            message += f"_...and {len(pending_approval) - 50} more pending_\n"
+            message += f"<i>...and {len(pending_approval) - 50} more pending</i>\n"
         message += "\n" + "=" * 30 + "\n\n"
 
     # Show first 20 non-pending users (approved + own-key)
     display_users = (approved_list + key_users)[:20]
     for user in display_users:
-        username = user.get('username', 'unknown')
-        name = user['name']
+        username = html.escape(user.get('username', 'unknown') or 'unknown')
+        name = html.escape(user.get('name', '') or '')
         user_meals = db.get_meals_by_date_range(user['user_id'], week_start, now)
         meal_count = len(user_meals)
 
@@ -1732,16 +1735,20 @@ async def seealluserstats_command(update: Update, context: ContextTypes.DEFAULT_
             else:
                 last_activity = f"{days_ago} days ago"
 
-        message += f"{status} *@{username}* ({name})\n"
+        message += f"{status} @{username} ({name})\n"
         message += f"   🍽 Meals (7d): {meal_count}\n"
         message += f"   🔑 Own API: {'✅' if user.get('gemini_api_key') else '❌'}\n"
         message += f"   📅 Last: {last_activity}\n\n"
 
     remaining = len(approved_list + key_users) - len(display_users)
     if remaining > 0:
-        message += f"\n_...and {remaining} more users_"
+        message += f"\n<i>...and {remaining} more users</i>"
 
-    await update.message.reply_text(message, parse_mode='Markdown')
+    await update.message.reply_text(
+        message,
+        parse_mode='HTML',
+        disable_web_page_preview=True,
+    )
 
 
 def main():
