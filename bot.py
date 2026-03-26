@@ -414,9 +414,9 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Use user's API key if they have one
         if user.get('gemini_api_key'):
             user_ai = AIAnalyzer(api_key=user['gemini_api_key'])
-            meal_data = user_ai.analyze_food_image(photo_path)
+            meal_data, usage = user_ai.analyze_food_image(photo_path)
         else:
-            meal_data = ai.analyze_food_image(photo_path)
+            meal_data, usage = ai.analyze_food_image(photo_path)
 
         meal_data['image_path'] = photo_path
 
@@ -430,8 +430,14 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
+        # Format message with token usage
+        message = format_meal_message(meal_data)
+        message += f"\n\n💡 *AI Usage*\n"
+        message += f"📊 Tokens: {usage['total_tokens']:,} (in: {usage['prompt_tokens']:,}, out: {usage['output_tokens']:,})\n"
+        message += f"💰 Cost: ${usage['cost_usd']:.6f}"
+
         await update.message.reply_text(
-            format_meal_message(meal_data),
+            message,
             parse_mode='Markdown',
             reply_markup=reply_markup
         )
@@ -554,7 +560,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         # Otherwise, treat as meal logging
-        meal_data = ai.analyze_text_meal(text)
+        meal_data, usage = ai.analyze_text_meal(text)
 
         # Save to pending meals
         db.save_pending_meal(user_id, meal_data)
@@ -566,7 +572,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
-        await update.message.reply_text(
+        message = (
             f"📝 I heard: \"{text}\"\n\n"
             f"📊 *Nutritional Information:*\n\n"
             f"🍽 {meal_data['description']}\n"
@@ -577,7 +583,14 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🥑 Fat: {meal_data['fat']}g\n"
             f"🌾 Fiber: {meal_data['fiber']}g\n"
             f"🍬 Sugar: {meal_data['sugar']}g\n\n"
-            f"Save this meal?",
+            f"💡 *AI Usage*\n"
+            f"📊 Tokens: {usage['total_tokens']:,} (in: {usage['prompt_tokens']:,}, out: {usage['output_tokens']:,})\n"
+            f"💰 Cost: ${usage['cost_usd']:.6f}\n\n"
+            f"Save this meal?"
+        )
+
+        await update.message.reply_text(
+            message,
             parse_mode='Markdown',
             reply_markup=reply_markup
         )
@@ -778,7 +791,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🔍 Analyzing your meal...")
 
         try:
-            meal_data = ai.analyze_text_meal(text)
+            meal_data, usage = ai.analyze_text_meal(text)
 
             # Save to pending meals
             db.save_pending_meal(user_id, meal_data)
@@ -790,7 +803,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
 
-            await update.message.reply_text(
+            message = (
                 f"📊 *Nutritional Information:*\n\n"
                 f"🍽 {meal_data['description']}\n"
                 f"🍴 Meal Type: {meal_data['meal_type'].title()}\n\n"
@@ -800,7 +813,14 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"🥑 Fat: {meal_data['fat']}g\n"
                 f"🌾 Fiber: {meal_data['fiber']}g\n"
                 f"🍬 Sugar: {meal_data['sugar']}g\n\n"
-                f"Save this meal?",
+                f"💡 *AI Usage*\n"
+                f"📊 Tokens: {usage['total_tokens']:,} (in: {usage['prompt_tokens']:,}, out: {usage['output_tokens']:,})\n"
+                f"💰 Cost: ${usage['cost_usd']:.6f}\n\n"
+                f"Save this meal?"
+            )
+
+            await update.message.reply_text(
+                message,
                 parse_mode='Markdown',
                 reply_markup=reply_markup
             )
@@ -820,7 +840,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🔍 Analyzing your meal...")
 
         try:
-            meal_data = ai.analyze_text_meal(text)
+            meal_data, usage = ai.analyze_text_meal(text)
 
             # Save to pending meals
             db.save_pending_meal(user_id, meal_data)
@@ -832,7 +852,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
 
-            await update.message.reply_text(
+            message = (
                 f"📊 *Nutritional Information:*\n\n"
                 f"🍽 {meal_data['description']}\n"
                 f"🍴 Meal Type: {meal_data['meal_type'].title()}\n\n"
@@ -842,7 +862,14 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"🥑 Fat: {meal_data['fat']}g\n"
                 f"🌾 Fiber: {meal_data['fiber']}g\n"
                 f"🍬 Sugar: {meal_data['sugar']}g\n\n"
-                f"Save this meal?",
+                f"💡 *AI Usage*\n"
+                f"📊 Tokens: {usage['total_tokens']:,} (in: {usage['prompt_tokens']:,}, out: {usage['output_tokens']:,})\n"
+                f"💰 Cost: ${usage['cost_usd']:.6f}\n\n"
+                f"Save this meal?"
+            )
+
+            await update.message.reply_text(
+                message,
                 parse_mode='Markdown',
                 reply_markup=reply_markup
             )
@@ -1487,10 +1514,24 @@ async def approve_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Approve user
     db.approve_user(target_user['user_id'])
 
+    # Send confirmation to admin
     await update.message.reply_text(
         f"✅ User @{username} has been approved!\n"
         f"They can now use the bot without providing their own API key."
     )
+
+    # Send notification to the approved user
+    try:
+        await context.bot.send_message(
+            chat_id=target_user['user_id'],
+            text=f"🎉 *Congratulations!*\n\n"
+                 f"Your account has been approved by the admin.\n"
+                 f"You can now use the bot to track your meals!\n\n"
+                 f"Send a photo of your meal to get started.",
+            parse_mode='Markdown'
+        )
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ User approved but couldn't send notification: {str(e)}")
 
 
 async def seealluserstats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):

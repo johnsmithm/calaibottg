@@ -4,6 +4,12 @@ from PIL import Image
 import json
 
 class AIAnalyzer:
+    # Gemini 2.5 Flash pricing (as of Jan 2025)
+    # Input: $0.075 per 1M tokens
+    # Output: $0.30 per 1M tokens
+    COST_PER_1M_INPUT_TOKENS = 0.075
+    COST_PER_1M_OUTPUT_TOKENS = 0.30
+
     def __init__(self, api_key=None):
         if api_key:
             genai.configure(api_key=api_key)
@@ -11,8 +17,18 @@ class AIAnalyzer:
             genai.configure(api_key=os.getenv('GOOGLE_AI_API_KEY'))
         self.model = genai.GenerativeModel('gemini-2.5-flash')
 
+    def _calculate_cost(self, input_tokens, output_tokens):
+        """Calculate estimated cost in USD"""
+        input_cost = (input_tokens / 1_000_000) * self.COST_PER_1M_INPUT_TOKENS
+        output_cost = (output_tokens / 1_000_000) * self.COST_PER_1M_OUTPUT_TOKENS
+        return input_cost + output_cost
+
     def analyze_food_image(self, image_path):
-        """Analyze food image and extract nutritional information using Gemini"""
+        """Analyze food image and extract nutritional information using Gemini
+
+        Returns:
+            tuple: (nutrition_data, usage_metadata)
+        """
 
         img = Image.open(image_path)
 
@@ -40,6 +56,17 @@ Only respond with the JSON object, no additional text."""
         response = self.model.generate_content([prompt, img])
         response_text = response.text
 
+        # Extract usage metadata
+        usage_metadata = {
+            'prompt_tokens': response.usage_metadata.prompt_token_count,
+            'output_tokens': response.usage_metadata.candidates_token_count,
+            'total_tokens': response.usage_metadata.total_token_count,
+            'cost_usd': self._calculate_cost(
+                response.usage_metadata.prompt_token_count,
+                response.usage_metadata.candidates_token_count
+            )
+        }
+
         # Parse response
         try:
             # Try to extract JSON from markdown code blocks
@@ -53,18 +80,22 @@ Only respond with the JSON object, no additional text."""
                 response_text = response_text[start:end].strip()
 
             nutrition_data = json.loads(response_text)
-            return nutrition_data
+            return nutrition_data, usage_metadata
         except json.JSONDecodeError:
             # Try to extract JSON from response
             start = response_text.find('{')
             end = response_text.rfind('}') + 1
             if start >= 0 and end > start:
                 nutrition_data = json.loads(response_text[start:end])
-                return nutrition_data
+                return nutrition_data, usage_metadata
             raise ValueError("Could not parse nutrition data from AI response")
 
     def analyze_text_meal(self, text):
-        """Analyze text description of meal and extract nutritional information"""
+        """Analyze text description of meal and extract nutritional information
+
+        Returns:
+            tuple: (nutrition_data, usage_metadata)
+        """
 
         prompt = f"""The user said: "{text}"
 
@@ -88,6 +119,17 @@ Only respond with the JSON object, no additional text."""
         response = self.model.generate_content(prompt)
         response_text = response.text
 
+        # Extract usage metadata
+        usage_metadata = {
+            'prompt_tokens': response.usage_metadata.prompt_token_count,
+            'output_tokens': response.usage_metadata.candidates_token_count,
+            'total_tokens': response.usage_metadata.total_token_count,
+            'cost_usd': self._calculate_cost(
+                response.usage_metadata.prompt_token_count,
+                response.usage_metadata.candidates_token_count
+            )
+        }
+
         try:
             # Try to extract JSON from markdown code blocks
             if '```json' in response_text:
@@ -100,13 +142,13 @@ Only respond with the JSON object, no additional text."""
                 response_text = response_text[start:end].strip()
 
             nutrition_data = json.loads(response_text)
-            return nutrition_data
+            return nutrition_data, usage_metadata
         except json.JSONDecodeError:
             start = response_text.find('{')
             end = response_text.rfind('}') + 1
             if start >= 0 and end > start:
                 nutrition_data = json.loads(response_text[start:end])
-                return nutrition_data
+                return nutrition_data, usage_metadata
             raise ValueError("Could not parse nutrition data from AI response")
 
     def parse_user_intent(self, text, user_data):
