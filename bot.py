@@ -914,6 +914,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             db.save_meal(user_id, meal)
             db.delete_pending_meal(user_id)
 
+            # Remove buttons from the original prediction message (without editing its text)
+            try:
+                await query.edit_message_reply_markup(reply_markup=None)
+            except Exception as e:
+                logger.warning(f"Failed to clear inline buttons: {e}")
+
             # Get user's daily progress
             user = db.get_user(user_id)
             today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
@@ -942,7 +948,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             message += f"🥑 Fat: {int(stats['total_fat'] or 0)}g\n\n"
             message += f"🍽 Meals today: {len(meals_today)}"
 
-            await query.edit_message_text(message, parse_mode='Markdown')
+            await context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text=message,
+                parse_mode='Markdown',
+            )
         else:
             await query.edit_message_text("❌ No pending meal found.")
 
