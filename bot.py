@@ -1,5 +1,6 @@
 import os
 import logging
+import re
 from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -267,7 +268,7 @@ async def get_dinner_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "1️⃣ Admin approval (contact @imosnoi)\n"
             "2️⃣ Your own Gemini API key\n\n"
             "If you have a Gemini API key, send it now.\n"
-            "Otherwise, send 'skip' and wait for admin approval.\n\n"
+            "Otherwise, send /skip and wait for admin approval.\n\n"
             "💡 Get a free API key at:\n"
             "https://aistudio.google.com/app/apikey",
             parse_mode='Markdown'
@@ -280,6 +281,60 @@ async def get_dinner_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return DINNER_TIME
 
 
+async def skip_api_key_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Skip API key during onboarding (wait for admin approval)."""
+    user_id = update.effective_user.id
+    username = update.effective_user.username or 'unknown'
+
+    if user_id not in user_onboarding_data:
+        await update.message.reply_text("No active onboarding found. Use /start to begin.")
+        return ConversationHandler.END
+
+    data = user_onboarding_data[user_id]
+    goal_speed = data.get('goal_speed', 'moderate')
+
+    daily_calories = calculate_daily_calorie_target(
+        weight=data['weight'],
+        height=data['height'],
+        goal=data['goal'],
+        goal_speed=goal_speed
+    )
+
+    # Save user without API key (pending approval)
+    db.create_user(
+        user_id=user_id,
+        username=username,
+        name=data['name'],
+        height=data['height'],
+        weight=data['weight'],
+        goal=data['goal'],
+        goal_speed=goal_speed,
+        daily_calorie_target=daily_calories,
+        gemini_api_key=None
+    )
+
+    # Save meal times
+    db.set_meal_time(user_id, 'breakfast', data['breakfast_time'])
+    db.set_meal_time(user_id, 'lunch', data['lunch_time'])
+    db.set_meal_time(user_id, 'dinner', data['dinner_time'])
+
+    del user_onboarding_data[user_id]
+
+    await update.message.reply_text(
+        f"✅ All set, {data['name']}!\n\n"
+        f"⏳ Waiting for admin approval. You'll be notified when approved.\n\n"
+        f"📊 Your daily calorie target: {daily_calories} kcal\n\n"
+        f"🔔 Reminders:\n"
+        f"• Breakfast: {data['breakfast_time']}\n"
+        f"• Lunch: {data['lunch_time']}\n"
+        f"• Dinner: {data['dinner_time']}\n\n"
+        f"🔒 You cannot upload photos or log meals until you are approved.\n\n"
+        f"Use /help to see all commands."
+    )
+
+    return ConversationHandler.END
+
+
 async def get_api_key(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Get API key and complete onboarding"""
     user_id = update.effective_user.id
@@ -287,7 +342,8 @@ async def get_api_key(update: Update, context: ContextTypes.DEFAULT_TYPE):
     api_key_input = update.message.text.strip()
 
     # Store API key if provided (not 'skip')
-    gemini_api_key = None if api_key_input.lower() == 'skip' else api_key_input
+    normalized = api_key_input.strip().lower()
+    gemini_api_key = None if normalized in ('skip', '/skip') else api_key_input
 
     # Calculate daily calorie target
     data = user_onboarding_data[user_id]
@@ -1556,6 +1612,55 @@ async def approve_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"⚠️ User approved but couldn't send notification: {str(e)}")
 
 
+async def approve_index_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin shortcut: /approve_1, /approve_2, ... approves pending users by index from /seealluserstats list."""
+    user_id = update.effective_user.id
+
+    if user_id != ADMIN_USER_ID:
+        await update.message.reply_text("❌ This command is only available to administrators.")
+        return
+
+    text = (update.message.text or "").strip()
+    m = re.match(r"^/approve_(\d+)\b", text)
+    if not m:
+        await update.message.reply_text("Usage: /approve_1 (from /seealluserstats pending list)")
+        return
+
+    idx = int(m.group(1))
+    users = db.get_all_users()
+
+    pending = [
+        u for u in users
+        if u.get('is_approved', 0) != 1 and not u.get('gemini_api_key')
+    ]
+
+    if idx < 1 or idx > len(pending):
+        await update.message.reply_text(f"❌ Invalid index. Pending users: {len(pending)}")
+        return
+
+    target_user = pending[idx - 1]
+    username = (target_user.get('username') or 'unknown').replace('@', '')
+
+    db.approve_user(target_user['user_id'])
+
+    await update.message.reply_text(
+        f"✅ Approved #{idx}: *@{username}* ({target_user.get('name', '')})",
+        parse_mode='Markdown'
+    )
+
+    try:
+        await context.bot.send_message(
+            chat_id=target_user['user_id'],
+            text=f"🎉 *Congratulations!*\n\n"
+                 f"Your account has been approved by the admin.\n"
+                 f"You can now use the bot to track your meals!\n\n"
+                 f"Send a photo of your meal to get started.",
+            parse_mode='Markdown'
+        )
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ User approved but couldn't send notification: {str(e)}")
+
+
 async def seealluserstats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Admin command to see all user statistics"""
     user_id = update.effective_user.id
@@ -1586,14 +1691,34 @@ async def seealluserstats_command(update: Update, context: ContextTypes.DEFAULT_
     now = datetime.now()
     week_start = now - timedelta(days=7)
 
-    for user in users[:20]:  # Show first 20 users
+    pending_approval = [u for u in users if u.get('is_approved', 0) != 1 and not u.get('gemini_api_key')]
+    key_users = [u for u in users if u.get('is_approved', 0) != 1 and u.get('gemini_api_key')]
+    approved_list = [u for u in users if u.get('is_approved', 0) == 1]
+
+    if pending_approval:
+        message += f"⏳ *PENDING APPROVAL* ({len(pending_approval)})\n"
+        for i, user in enumerate(pending_approval[:50], start=1):
+            username = user.get('username', 'unknown')
+            name = user.get('name', '')
+            message += f"{i}) *@{username}* ({name}) — `/approve_{i}`\n"
+        if len(pending_approval) > 50:
+            message += f"_...and {len(pending_approval) - 50} more pending_\n"
+        message += "\n" + "=" * 30 + "\n\n"
+
+    # Show first 20 non-pending users (approved + own-key)
+    display_users = (approved_list + key_users)[:20]
+    for user in display_users:
         username = user.get('username', 'unknown')
         name = user['name']
         user_meals = db.get_meals_by_date_range(user['user_id'], week_start, now)
         meal_count = len(user_meals)
 
-        status = "✅" if user.get('is_approved', 0) == 1 else "⏳"
-        has_key = "🔑" if user.get('gemini_api_key') else "❌"
+        if user.get('is_approved', 0) == 1:
+            status = "✅"
+        elif user.get('gemini_api_key'):
+            status = "🔑"
+        else:
+            status = "⏳"
 
         last_activity = "Never"
         if user_meals:
@@ -1609,11 +1734,12 @@ async def seealluserstats_command(update: Update, context: ContextTypes.DEFAULT_
 
         message += f"{status} *@{username}* ({name})\n"
         message += f"   🍽 Meals (7d): {meal_count}\n"
-        message += f"   🔑 Own API: {has_key}\n"
+        message += f"   🔑 Own API: {'✅' if user.get('gemini_api_key') else '❌'}\n"
         message += f"   📅 Last: {last_activity}\n\n"
 
-    if total_users > 20:
-        message += f"\n_...and {total_users - 20} more users_"
+    remaining = len(approved_list + key_users) - len(display_users)
+    if remaining > 0:
+        message += f"\n_...and {remaining} more users_"
 
     await update.message.reply_text(message, parse_mode='Markdown')
 
@@ -1643,7 +1769,10 @@ def main():
             BREAKFAST_TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_breakfast_time)],
             LUNCH_TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_lunch_time)],
             DINNER_TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_dinner_time)],
-            API_KEY: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_api_key)],
+            API_KEY: [
+                CommandHandler('skip', skip_api_key_command),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, get_api_key),
+            ],
         },
         fallbacks=[CommandHandler('cancel', cancel_onboarding)],
     )
@@ -1668,6 +1797,7 @@ def main():
     # Admin commands
     application.add_handler(CommandHandler('approve', approve_command))
     application.add_handler(CommandHandler('seealluserstats', seealluserstats_command))
+    application.add_handler(MessageHandler(filters.Regex(r'^/approve_\d+\b'), approve_index_command))
 
     # Message handlers
     application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
