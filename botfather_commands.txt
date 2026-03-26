@@ -3,6 +3,7 @@ today - Show today's statistics
 week - Show this week's statistics
 month - Show this month's statistics
 year - Show this year's statistics
+yesterday - Show yesterday's stats (Instagram-ready)
 progress - Show daily progress bar
 profile - View your profile info
 history - View recent meals (last 7 days)
@@ -10,4 +11,6 @@ reminders - View and manage meal reminders
 delete - Delete last logged meal
 reset - Reset all data and start over
 stats - Show statistics (supports day/week/month/year)
+approve - [Admin] Approve a user to use the bot
+seealluserstats - [Admin] View all users statistics
 help - Show help and commands

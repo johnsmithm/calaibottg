@@ -31,12 +31,15 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Admin user ID
+ADMIN_USER_ID = int(os.getenv('ADMIN_USER_ID', '0'))
+
 # Initialize components
 db = Database()
 ai = AIAnalyzer()
 
 # Conversation states
-NAME, HEIGHT, WEIGHT, GOAL, GOAL_SPEED, BREAKFAST_TIME, LUNCH_TIME, DINNER_TIME = range(8)
+NAME, HEIGHT, WEIGHT, GOAL, GOAL_SPEED, BREAKFAST_TIME, LUNCH_TIME, DINNER_TIME, API_KEY = range(9)
 
 # User data storage for onboarding
 user_onboarding_data = {}
@@ -45,6 +48,10 @@ user_onboarding_data = {}
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Start command - begins user onboarding"""
     user_id = update.effective_user.id
+    username = update.effective_user.username or 'unknown'
+
+    # Log user info for admin setup
+    logger.info(f"User attempting /start - ID: {user_id}, Username: @{username}")
 
     # Check if user exists
     user = db.get_user(user_id)
@@ -245,7 +252,7 @@ async def get_lunch_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def get_dinner_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Get dinner time and complete onboarding"""
+    """Get dinner time and ask for API key"""
     user_id = update.effective_user.id
 
     try:
@@ -253,54 +260,86 @@ async def get_dinner_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
         dinner_time = parse_time(time_str)
         user_onboarding_data[user_id]['dinner_time'] = dinner_time
 
-        # Calculate daily calorie target
-        data = user_onboarding_data[user_id]
-        goal_speed = data.get('goal_speed', 'moderate')
-
-        daily_calories = calculate_daily_calorie_target(
-            weight=data['weight'],
-            height=data['height'],
-            goal=data['goal'],
-            goal_speed=goal_speed
-        )
-
-        # Save user to database
-        db.create_user(
-            user_id=user_id,
-            name=data['name'],
-            height=data['height'],
-            weight=data['weight'],
-            goal=data['goal'],
-            goal_speed=goal_speed,
-            daily_calorie_target=daily_calories
-        )
-
-        # Save meal times
-        db.set_meal_time(user_id, 'breakfast', data['breakfast_time'])
-        db.set_meal_time(user_id, 'lunch', data['lunch_time'])
-        db.set_meal_time(user_id, 'dinner', data['dinner_time'])
-
-        # Clear onboarding data
-        del user_onboarding_data[user_id]
-
+        # Ask for API key
         await update.message.reply_text(
-            f"✅ All set, {data['name']}!\n\n"
-            f"📊 Your daily calorie target: {daily_calories} kcal\n\n"
-            f"🔔 Reminders:\n"
-            f"• Breakfast: {data['breakfast_time']}\n"
-            f"• Lunch: {data['lunch_time']}\n"
-            f"• Dinner: {data['dinner_time']}\n\n"
-            "📸 Send me a photo of your meal to get started!\n"
-            "🎤 You can also send voice messages or text descriptions.\n\n"
-            "Use /help to see all commands."
+            "🔑 *API Key Setup*\n\n"
+            "To use this bot, you need either:\n"
+            "1️⃣ Admin approval (contact @imosnoi)\n"
+            "2️⃣ Your own Gemini API key\n\n"
+            "If you have a Gemini API key, send it now.\n"
+            "Otherwise, send 'skip' and wait for admin approval.\n\n"
+            "💡 Get a free API key at:\n"
+            "https://aistudio.google.com/app/apikey",
+            parse_mode='Markdown'
         )
-
-        return ConversationHandler.END
+        return API_KEY
     except:
         await update.message.reply_text(
             "Please enter a valid time (e.g., 19:00 or 7pm)"
         )
         return DINNER_TIME
+
+
+async def get_api_key(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Get API key and complete onboarding"""
+    user_id = update.effective_user.id
+    username = update.effective_user.username or 'unknown'
+    api_key_input = update.message.text.strip()
+
+    # Store API key if provided (not 'skip')
+    gemini_api_key = None if api_key_input.lower() == 'skip' else api_key_input
+
+    # Calculate daily calorie target
+    data = user_onboarding_data[user_id]
+    goal_speed = data.get('goal_speed', 'moderate')
+
+    daily_calories = calculate_daily_calorie_target(
+        weight=data['weight'],
+        height=data['height'],
+        goal=data['goal'],
+        goal_speed=goal_speed
+    )
+
+    # Save user to database
+    db.create_user(
+        user_id=user_id,
+        username=username,
+        name=data['name'],
+        height=data['height'],
+        weight=data['weight'],
+        goal=data['goal'],
+        goal_speed=goal_speed,
+        daily_calorie_target=daily_calories,
+        gemini_api_key=gemini_api_key
+    )
+
+    # Save meal times
+    db.set_meal_time(user_id, 'breakfast', data['breakfast_time'])
+    db.set_meal_time(user_id, 'lunch', data['lunch_time'])
+    db.set_meal_time(user_id, 'dinner', data['dinner_time'])
+
+    # Clear onboarding data
+    del user_onboarding_data[user_id]
+
+    if gemini_api_key:
+        status_msg = "✅ Your API key has been saved!"
+    else:
+        status_msg = "⏳ Waiting for admin approval. You'll be notified when approved."
+
+    await update.message.reply_text(
+        f"✅ All set, {data['name']}!\n\n"
+        f"{status_msg}\n\n"
+        f"📊 Your daily calorie target: {daily_calories} kcal\n\n"
+        f"🔔 Reminders:\n"
+        f"• Breakfast: {data['breakfast_time']}\n"
+        f"• Lunch: {data['lunch_time']}\n"
+        f"• Dinner: {data['dinner_time']}\n\n"
+        "📸 Send me a photo of your meal to get started!\n"
+        "🎤 You can also send voice messages or text descriptions.\n\n"
+        "Use /help to see all commands."
+    )
+
+    return ConversationHandler.END
 
 
 async def cancel_onboarding(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -315,6 +354,30 @@ async def cancel_onboarding(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
+def format_meal_message(meal_data):
+    """Format meal data with ingredient breakdown"""
+    message = f"📊 *Nutritional Information:*\n\n"
+    message += f"🍽 {meal_data['description']}\n"
+    message += f"🍴 Meal Type: {meal_data['meal_type'].title()}\n\n"
+
+    # Show ingredients if available
+    if 'ingredients' in meal_data and meal_data['ingredients']:
+        message += f"*INGREDIENTS:*\n"
+        for ing in meal_data['ingredients']:
+            message += f"• {ing['name']} ({ing['amount']}) - {ing['calories']} kcal\n"
+        message += f"\n*TOTAL:*\n"
+
+    message += f"⚡️ Calories: {meal_data['calories']} kcal\n"
+    message += f"🥩 Protein: {meal_data['protein']}g\n"
+    message += f"🍞 Carbs: {meal_data['carbs']}g\n"
+    message += f"🥑 Fat: {meal_data['fat']}g\n"
+    message += f"🌾 Fiber: {meal_data['fiber']}g\n"
+    message += f"🍬 Sugar: {meal_data['sugar']}g\n\n"
+    message += f"Save this meal?"
+
+    return message
+
+
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle photo uploads"""
     user_id = update.effective_user.id
@@ -324,6 +387,14 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not user:
         await update.message.reply_text(
             "Please complete onboarding first with /start"
+        )
+        return
+
+    # Check if user is approved or has own API key
+    if not user.get('is_approved') and not user.get('gemini_api_key'):
+        await update.message.reply_text(
+            "⏳ Your account is pending approval.\n\n"
+            "Please wait for admin approval, or restart onboarding with /start to provide your own Gemini API key."
         )
         return
 
@@ -340,8 +411,13 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         photo_path = f"photos/{user_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
         await photo_file.download_to_drive(photo_path)
 
-        # Analyze with AI
-        meal_data = ai.analyze_food_image(photo_path)
+        # Use user's API key if they have one
+        if user.get('gemini_api_key'):
+            user_ai = AIAnalyzer(api_key=user['gemini_api_key'])
+            meal_data = user_ai.analyze_food_image(photo_path)
+        else:
+            meal_data = ai.analyze_food_image(photo_path)
+
         meal_data['image_path'] = photo_path
 
         # Save to pending meals
@@ -355,16 +431,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         await update.message.reply_text(
-            f"📊 *Nutritional Information:*\n\n"
-            f"🍽 {meal_data['description']}\n"
-            f"🍴 Meal Type: {meal_data['meal_type'].title()}\n\n"
-            f"⚡️ Calories: {meal_data['calories']} kcal\n"
-            f"🥩 Protein: {meal_data['protein']}g\n"
-            f"🍞 Carbs: {meal_data['carbs']}g\n"
-            f"🥑 Fat: {meal_data['fat']}g\n"
-            f"🌾 Fiber: {meal_data['fiber']}g\n"
-            f"🍬 Sugar: {meal_data['sugar']}g\n\n"
-            f"Save this meal?",
+            format_meal_message(meal_data),
             parse_mode='Markdown',
             reply_markup=reply_markup
         )
@@ -385,6 +452,14 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not user:
         await update.message.reply_text(
             "Please complete onboarding first with /start"
+        )
+        return
+
+    # Check if user is approved or has own API key
+    if not user.get('is_approved') and not user.get('gemini_api_key'):
+        await update.message.reply_text(
+            "⏳ Your account is pending approval.\n\n"
+            "Please wait for admin approval, or restart onboarding with /start to provide your own Gemini API key."
         )
         return
 
@@ -524,6 +599,14 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not user:
         await update.message.reply_text(
             "Please complete onboarding first with /start"
+        )
+        return
+
+    # Check if user is approved or has own API key
+    if not user.get('is_approved') and not user.get('gemini_api_key'):
+        await update.message.reply_text(
+            "⏳ Your account is pending approval.\n\n"
+            "Please wait for admin approval, or restart onboarding with /start to provide your own Gemini API key."
         )
         return
 
@@ -798,16 +881,29 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             today_end = today_start + timedelta(days=1)
 
             stats = db.get_stats(user_id, today_start, today_end)
+            meals_today = db.get_meals_by_date_range(user_id, today_start, today_end)
 
             total_cals = stats['total_calories'] or 0
             remaining = user['daily_calorie_target'] - total_cals
+            percentage = (total_cals / user['daily_calorie_target'] * 100) if user['daily_calorie_target'] > 0 else 0
 
-            await query.edit_message_text(
-                f"✅ Meal saved!\n\n"
-                f"📊 Today's Progress:\n"
-                f"Consumed: {int(total_cals)} / {int(user['daily_calorie_target'])} kcal\n"
-                f"Remaining: {int(remaining)} kcal"
-            )
+            # Progress bar
+            bar_length = 20
+            filled = int(bar_length * percentage / 100)
+            bar = "█" * filled + "░" * (bar_length - filled)
+
+            message = f"✅ *Meal Saved!*\n\n"
+            message += f"📊 *TODAY'S PROGRESS*\n"
+            message += f"{bar} {percentage:.1f}%\n\n"
+            message += f"⚡️ {int(total_cals)} / {int(user['daily_calorie_target'])} kcal\n"
+            message += f"📊 Remaining: {int(remaining)} kcal\n\n"
+            message += f"*MACROS TODAY:*\n"
+            message += f"🥩 Protein: {int(stats['total_protein'] or 0)}g\n"
+            message += f"🍞 Carbs: {int(stats['total_carbs'] or 0)}g\n"
+            message += f"🥑 Fat: {int(stats['total_fat'] or 0)}g\n\n"
+            message += f"🍽 Meals today: {len(meals_today)}"
+
+            await query.edit_message_text(message, parse_mode='Markdown')
         else:
             await query.edit_message_text("❌ No pending meal found.")
 
@@ -1262,6 +1358,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/week - This week's stats\n"
         "/month - This month's stats\n"
         "/year - This year's stats\n"
+        "/yesterday - Yesterday's stats (Instagram-ready)\n"
         "/progress - Daily progress bar\n"
         "/profile - Your profile info\n"
         "/history - Recent meals\n"
@@ -1278,6 +1375,184 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     await update.message.reply_text(help_text, parse_mode='Markdown')
+
+
+async def yesterday_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show yesterday's stats in Instagram-ready format"""
+    user_id = update.effective_user.id
+    user = db.get_user(user_id)
+    if not user:
+        await update.message.reply_text("Please complete onboarding first with /start")
+        return
+
+    # Get yesterday's date range
+    today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    yesterday_start = today - timedelta(days=1)
+    yesterday_end = today
+
+    stats = db.get_stats(user_id, yesterday_start, yesterday_end)
+    meals = db.get_meals_by_date_range(user_id, yesterday_start, yesterday_end)
+
+    if not stats or stats['meal_count'] == 0:
+        await update.message.reply_text("No meals recorded yesterday.")
+        return
+
+    # Group meals by type
+    breakfast_meals = [m for m in meals if m['meal_type'] == 'breakfast']
+    lunch_meals = [m for m in meals if m['meal_type'] == 'lunch']
+    dinner_meals = [m for m in meals if m['meal_type'] == 'dinner']
+    snack_meals = [m for m in meals if m['meal_type'] == 'snack']
+
+    # Create Instagram-ready message
+    date_str = yesterday_start.strftime('%B %d, %Y')
+
+    message = f"📅 *{date_str}*\n"
+    message += "=" * 30 + "\n\n"
+
+    # Total summary
+    message += f"📊 *DAILY SUMMARY*\n"
+    message += f"⚡️ Total Calories: {int(stats['total_calories'] or 0)} kcal\n"
+    message += f"🍽 Meals Logged: {stats['meal_count']}\n\n"
+
+    # Macros
+    message += f"*MACROS:*\n"
+    message += f"🥩 Protein: {int(stats['total_protein'] or 0)}g\n"
+    message += f"🍞 Carbs: {int(stats['total_carbs'] or 0)}g\n"
+    message += f"🥑 Fat: {int(stats['total_fat'] or 0)}g\n"
+    message += f"🌾 Fiber: {int(stats['total_fiber'] or 0)}g\n\n"
+
+    # Meals breakdown
+    if breakfast_meals:
+        message += f"🌅 *BREAKFAST* ({len(breakfast_meals)} meal{'s' if len(breakfast_meals) > 1 else ''})\\n"
+        for meal in breakfast_meals:
+            message += f"   • {meal['description'][:40]}... ({int(meal['calories'])} kcal)\n"
+        message += "\n"
+
+    if lunch_meals:
+        message += f"🌞 *LUNCH* ({len(lunch_meals)} meal{'s' if len(lunch_meals) > 1 else ''})\\n"
+        for meal in lunch_meals:
+            message += f"   • {meal['description'][:40]}... ({int(meal['calories'])} kcal)\n"
+        message += "\n"
+
+    if dinner_meals:
+        message += f"🌙 *DINNER* ({len(dinner_meals)} meal{'s' if len(dinner_meals) > 1 else ''})\\n"
+        for meal in dinner_meals:
+            message += f"   • {meal['description'][:40]}... ({int(meal['calories'])} kcal)\n"
+        message += "\n"
+
+    if snack_meals:
+        message += f"🍿 *SNACKS* ({len(snack_meals)} snack{'s' if len(snack_meals) > 1 else ''})\\n"
+        for meal in snack_meals:
+            message += f"   • {meal['description'][:40]}... ({int(meal['calories'])} kcal)\n"
+        message += "\n"
+
+    message += "=" * 30 + "\n"
+    message += f"🎯 Target: {int(user['daily_calorie_target'])} kcal\n"
+
+    difference = (stats['total_calories'] or 0) - user['daily_calorie_target']
+    if difference > 0:
+        message += f"📈 Over by: {int(difference)} kcal"
+    else:
+        message += f"📉 Under by: {int(abs(difference))} kcal"
+
+    await update.message.reply_text(message, parse_mode='Markdown')
+
+
+async def approve_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin command to approve users"""
+    user_id = update.effective_user.id
+
+    # Check if admin
+    if user_id != ADMIN_USER_ID:
+        await update.message.reply_text("❌ This command is only available to administrators.")
+        return
+
+    # Get username from command args
+    if not context.args:
+        await update.message.reply_text(
+            "Usage: /approve @username\n"
+            "Example: /approve @john"
+        )
+        return
+
+    username = context.args[0].replace('@', '')
+
+    # Find user by username
+    target_user = db.get_user_by_username(username)
+
+    if not target_user:
+        await update.message.reply_text(f"❌ User @{username} not found.")
+        return
+
+    # Approve user
+    db.approve_user(target_user['user_id'])
+
+    await update.message.reply_text(
+        f"✅ User @{username} has been approved!\n"
+        f"They can now use the bot without providing their own API key."
+    )
+
+
+async def seealluserstats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin command to see all user statistics"""
+    user_id = update.effective_user.id
+
+    # Check if admin
+    if user_id != ADMIN_USER_ID:
+        await update.message.reply_text("❌ This command is only available to administrators.")
+        return
+
+    users = db.get_all_users()
+
+    if not users:
+        await update.message.reply_text("No users found.")
+        return
+
+    message = "👥 *ALL USERS STATISTICS*\n\n"
+
+    total_users = len(users)
+    approved_users = len([u for u in users if u.get('is_approved', 0) == 1])
+
+    message += f"📊 Total Users: {total_users}\n"
+    message += f"✅ Approved: {approved_users}\n"
+    message += f"⏳ Pending: {total_users - approved_users}\n\n"
+
+    message += "=" * 30 + "\n\n"
+
+    # Get stats for each user
+    now = datetime.now()
+    week_start = now - timedelta(days=7)
+
+    for user in users[:20]:  # Show first 20 users
+        username = user.get('username', 'unknown')
+        name = user['name']
+        user_meals = db.get_meals_by_date_range(user['user_id'], week_start, now)
+        meal_count = len(user_meals)
+
+        status = "✅" if user.get('is_approved', 0) == 1 else "⏳"
+        has_key = "🔑" if user.get('gemini_api_key') else "❌"
+
+        last_activity = "Never"
+        if user_meals:
+            last_meal = max(user_meals, key=lambda x: x['eaten_at'])
+            last_dt = datetime.fromisoformat(last_meal['eaten_at'])
+            days_ago = (now - last_dt).days
+            if days_ago == 0:
+                last_activity = "Today"
+            elif days_ago == 1:
+                last_activity = "Yesterday"
+            else:
+                last_activity = f"{days_ago} days ago"
+
+        message += f"{status} *@{username}* ({name})\n"
+        message += f"   🍽 Meals (7d): {meal_count}\n"
+        message += f"   🔑 Own API: {has_key}\n"
+        message += f"   📅 Last: {last_activity}\n\n"
+
+    if total_users > 20:
+        message += f"\n_...and {total_users - 20} more users_"
+
+    await update.message.reply_text(message, parse_mode='Markdown')
 
 
 def main():
@@ -1305,6 +1580,7 @@ def main():
             BREAKFAST_TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_breakfast_time)],
             LUNCH_TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_lunch_time)],
             DINNER_TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_dinner_time)],
+            API_KEY: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_api_key)],
         },
         fallbacks=[CommandHandler('cancel', cancel_onboarding)],
     )
@@ -1316,6 +1592,7 @@ def main():
     application.add_handler(CommandHandler('week', week_command))
     application.add_handler(CommandHandler('month', month_command))
     application.add_handler(CommandHandler('year', year_command))
+    application.add_handler(CommandHandler('yesterday', yesterday_command))
     application.add_handler(CommandHandler('profile', profile_command))
     application.add_handler(CommandHandler('history', history_command))
     application.add_handler(CommandHandler('delete', delete_command))
@@ -1324,6 +1601,10 @@ def main():
     application.add_handler(CommandHandler('reminders', reminders_command))
     application.add_handler(CommandHandler('stats', stats_command))
     application.add_handler(CommandHandler('help', help_command))
+
+    # Admin commands
+    application.add_handler(CommandHandler('approve', approve_command))
+    application.add_handler(CommandHandler('seealluserstats', seealluserstats_command))
 
     # Message handlers
     application.add_handler(MessageHandler(filters.PHOTO, handle_photo))

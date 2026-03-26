@@ -4,8 +4,11 @@ from PIL import Image
 import json
 
 class AIAnalyzer:
-    def __init__(self):
-        genai.configure(api_key=os.getenv('GOOGLE_AI_API_KEY'))
+    def __init__(self, api_key=None):
+        if api_key:
+            genai.configure(api_key=api_key)
+        else:
+            genai.configure(api_key=os.getenv('GOOGLE_AI_API_KEY'))
         self.model = genai.GenerativeModel('gemini-2.5-flash')
 
     def analyze_food_image(self, image_path):
@@ -13,7 +16,7 @@ class AIAnalyzer:
 
         img = Image.open(image_path)
 
-        prompt = """Analyze this food image and provide detailed nutritional information.
+        prompt = """Analyze this food image and provide detailed nutritional information with ingredient breakdown.
 
 Return a JSON object with the following structure:
 {
@@ -24,10 +27,14 @@ Return a JSON object with the following structure:
     "fat": <number in grams>,
     "fiber": <number in grams>,
     "sugar": <number in grams>,
-    "meal_type": "breakfast|lunch|dinner|snack"
+    "meal_type": "breakfast|lunch|dinner|snack",
+    "ingredients": [
+        {"name": "ingredient name", "amount": "200g", "calories": 150},
+        {"name": "ingredient name", "amount": "100g", "calories": 80}
+    ]
 }
 
-Be as accurate as possible with portion estimation. If you're unsure, provide your best estimate.
+Be as accurate as possible with portion estimation. Break down the meal into individual ingredients.
 Only respond with the JSON object, no additional text."""
 
         response = self.model.generate_content([prompt, img])

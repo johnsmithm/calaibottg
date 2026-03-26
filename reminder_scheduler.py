@@ -3,6 +3,8 @@ import time
 import threading
 from datetime import datetime
 import asyncio
+import pytz
+import os
 from database import Database
 
 
@@ -34,7 +36,9 @@ class ReminderScheduler:
 
     def check_reminders(self):
         """Check and send reminders for all users"""
-        current_time = datetime.now().strftime('%H:%M')
+        # Use Moldova timezone
+        tz = pytz.timezone(os.getenv('TIMEZONE', 'Europe/Chisinau'))
+        current_time = datetime.now(tz).strftime('%H:%M')
 
         # Get all users from database
         conn = self.db.get_connection()

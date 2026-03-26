@@ -3,7 +3,12 @@ from datetime import datetime
 import json
 
 class Database:
-    def __init__(self, db_name="calorie_tracker.db"):
+    def __init__(self, db_name=None):
+        # Use /data volume on Railway, local path otherwise
+        if db_name is None:
+            import os
+            data_dir = '/data' if os.path.exists('/data') else '.'
+            db_name = os.path.join(data_dir, 'calorie_tracker.db')
         self.db_name = db_name
         self.init_db()
 
@@ -20,12 +25,15 @@ class Database:
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
+                username TEXT,
                 name TEXT NOT NULL,
                 height REAL NOT NULL,
                 weight REAL NOT NULL,
                 goal TEXT NOT NULL,
                 goal_speed TEXT NOT NULL,
                 daily_calorie_target REAL NOT NULL,
+                gemini_api_key TEXT,
+                is_approved INTEGER DEFAULT 0,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
@@ -82,16 +90,39 @@ class Database:
         conn.commit()
         conn.close()
 
-    def create_user(self, user_id, name, height, weight, goal, goal_speed, daily_calorie_target):
+    def create_user(self, user_id, username, name, height, weight, goal, goal_speed, daily_calorie_target, gemini_api_key=None):
         conn = self.get_connection()
         cursor = conn.cursor()
         cursor.execute('''
             INSERT OR REPLACE INTO users
-            (user_id, name, height, weight, goal, goal_speed, daily_calorie_target, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (user_id, name, height, weight, goal, goal_speed, daily_calorie_target, datetime.now()))
+            (user_id, username, name, height, weight, goal, goal_speed, daily_calorie_target, gemini_api_key, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (user_id, username, name, height, weight, goal, goal_speed, daily_calorie_target, gemini_api_key, datetime.now()))
         conn.commit()
         conn.close()
+
+    def approve_user(self, user_id):
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('UPDATE users SET is_approved = 1 WHERE user_id = ?', (user_id,))
+        conn.commit()
+        conn.close()
+
+    def get_all_users(self):
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM users ORDER BY created_at DESC')
+        users = cursor.fetchall()
+        conn.close()
+        return [dict(user) for user in users]
+
+    def get_user_by_username(self, username):
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM users WHERE username = ?', (username,))
+        user = cursor.fetchone()
+        conn.close()
+        return dict(user) if user else None
 
     def get_user(self, user_id):
         conn = self.get_connection()
