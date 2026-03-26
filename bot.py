@@ -323,8 +323,18 @@ async def get_api_key(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if gemini_api_key:
         status_msg = "✅ Your API key has been saved!"
+        instructions = (
+            "📸 Send me a photo of your meal to get started!\n"
+            "🎤 You can also send voice messages or text descriptions.\n\n"
+            "Use /help to see all commands."
+        )
     else:
         status_msg = "⏳ Waiting for admin approval. You'll be notified when approved."
+        instructions = (
+            "🔒 You cannot upload photos or log meals until you are approved.\n\n"
+            "Please wait for admin approval, or use /start to restart onboarding and provide your own Gemini API key.\n\n"
+            "Use /help to see all commands."
+        )
 
     await update.message.reply_text(
         f"✅ All set, {data['name']}!\n\n"
@@ -334,9 +344,7 @@ async def get_api_key(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"• Breakfast: {data['breakfast_time']}\n"
         f"• Lunch: {data['lunch_time']}\n"
         f"• Dinner: {data['dinner_time']}\n\n"
-        "📸 Send me a photo of your meal to get started!\n"
-        "🎤 You can also send voice messages or text descriptions.\n\n"
-        "Use /help to see all commands."
+        f"{instructions}"
     )
 
     return ConversationHandler.END
@@ -615,16 +623,20 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Check if user is approved or has own API key
-    if not user.get('is_approved') and not user.get('gemini_api_key'):
-        await update.message.reply_text(
-            "⏳ Your account is pending approval.\n\n"
-            "Please wait for admin approval, or restart onboarding with /start to provide your own Gemini API key."
-        )
-        return
-
     # Use AI to understand user intent
     intent = ai.parse_user_intent(text, user)
+
+    # Check if user is approved or has own API key (allow read-only actions)
+    if not user.get('is_approved') and not user.get('gemini_api_key'):
+        # Allow get_stats and get_profile without approval
+        if intent['action'] not in ['get_stats', 'get_profile']:
+            await update.message.reply_text(
+                "⏳ Your account is pending approval.\n\n"
+                "You cannot log meals or update settings until approved.\n\n"
+                "Please wait for admin approval, or restart onboarding with /start to provide your own Gemini API key.\n\n"
+                "You can still view your profile with commands like /profile or /help."
+            )
+            return
 
     # Handle different intents
     if intent['action'] == 'get_stats':
