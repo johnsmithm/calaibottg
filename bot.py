@@ -1844,8 +1844,12 @@ async def approve_index_command(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin debug command to see recent user profiles
-    Usage: /debug [weight=65] [name=john] [approved=0]
+    """Admin debug command to see user profiles
+    Usage:
+    /debug - Show all users (max 20)
+    /debug all - Show ALL users (no limit)
+    /debug weight=65 - Filter by weight
+    /debug approved=0 - Filter by approval status
     """
     user_id = update.effective_user.id
 
@@ -1862,6 +1866,11 @@ async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Parse filter arguments
     args = context.args
     filtered_users = users
+    show_all = 'all' in args if args else False
+
+    # Remove 'all' from filters
+    if args and 'all' in args:
+        args = [a for a in args if a != 'all']
 
     if args:
         for arg in args:
@@ -1894,16 +1903,21 @@ async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     except ValueError:
                         pass
 
-    # Sort by created_at descending (newest first) and limit to 10
-    sorted_users = sorted(filtered_users, key=lambda u: u.get('created_at', ''), reverse=True)[:10]
+    # Sort by created_at descending (newest first)
+    sorted_users = sorted(filtered_users, key=lambda u: u.get('created_at', ''), reverse=True)
 
-    if not sorted_users:
+    # Limit to 20 unless 'all' specified
+    limit = len(sorted_users) if show_all else 20
+    display_users = sorted_users[:limit]
+
+    if not display_users:
         await update.message.reply_text("No users found matching the filters.")
         return
 
     filter_text = f" (Filters: {' '.join(args)})" if args else ""
-    message = f"🔍 *DEBUG - Users{filter_text}*\n"
-    message += f"Found: {len(filtered_users)} | Showing: {len(sorted_users)}\n\n"
+    all_text = " - ALL" if show_all else ""
+    message = f"🔍 *DEBUG - Users{filter_text}{all_text}*\n"
+    message += f"Found: {len(filtered_users)} | Showing: {len(display_users)}\n\n"
 
     for i, user in enumerate(sorted_users, 1):
         user_id_val = user.get('user_id', 'N/A')
