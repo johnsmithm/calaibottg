@@ -1843,6 +1843,50 @@ async def approve_index_command(update: Update, context: ContextTypes.DEFAULT_TY
         await update.message.reply_text(f"⚠️ User approved but couldn't send notification: {str(e)}")
 
 
+async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin debug command to see recent user profiles"""
+    user_id = update.effective_user.id
+
+    if user_id != ADMIN_USER_ID:
+        await update.message.reply_text("❌ This command is only available to administrators.")
+        return
+
+    users = db.get_all_users()
+
+    if not users:
+        await update.message.reply_text("No users found in database.")
+        return
+
+    # Sort by created_at descending (newest first)
+    sorted_users = sorted(users, key=lambda u: u.get('created_at', ''), reverse=True)[:10]
+
+    message = "🔍 *DEBUG - Last 10 Users Created*\n\n"
+
+    for i, user in enumerate(sorted_users, 1):
+        user_id_val = user.get('user_id', 'N/A')
+        username = user.get('username', None)
+        name = user.get('name', 'N/A')
+        height = user.get('height', 'N/A')
+        weight = user.get('weight', 'N/A')
+        is_approved = user.get('is_approved', 0)
+        has_api_key = 'Yes' if user.get('gemini_api_key') else 'No'
+        created = user.get('created_at', 'N/A')
+
+        # Handle missing username
+        username_display = f"@{username}" if username else "NO USERNAME"
+
+        message += f"{i}. *User ID:* {user_id_val}\n"
+        message += f"   Username: {username_display}\n"
+        message += f"   Name: {name}\n"
+        message += f"   Height: {height} cm\n"
+        message += f"   Weight: {weight} kg\n"
+        message += f"   Approved: {'✅' if is_approved == 1 else '❌'}\n"
+        message += f"   Has API Key: {has_api_key}\n"
+        message += f"   Created: {created}\n\n"
+
+    await update.message.reply_text(message, parse_mode='Markdown')
+
+
 async def seealluserstats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Admin command to see all user statistics"""
     user_id = update.effective_user.id
@@ -1883,12 +1927,18 @@ async def seealluserstats_command(update: Update, context: ContextTypes.DEFAULT_
     if pending_approval:
         message += f"⏳ *PENDING APPROVAL* ({len(pending_approval)})\n"
         for i, user in enumerate(pending_approval[:50], start=1):
-            username = user.get('username', 'unknown') or 'unknown'
-            if username.startswith('@'):
-                username = username[1:]
+            username = user.get('username')
+            # Handle users without username
+            if username:
+                if username.startswith('@'):
+                    username = username[1:]
+                username_display = f"@{username}"
+            else:
+                username_display = "NO_USERNAME"
+
             name = user.get('name', '') or ''
             user_id = user.get('user_id', 'unknown')
-            message += f"{i}. @{username} ({name}) [ID:{user_id}] - /approve_{i}\n"
+            message += f"{i}. {username_display} ({name}) [ID:{user_id}] - /approve_{i}\n"
         if len(pending_approval) > 50:
             message += f"...and {len(pending_approval) - 50} more pending\n"
         message += "\n" + "=" * 30 + "\n\n"
@@ -1899,9 +1949,15 @@ async def seealluserstats_command(update: Update, context: ContextTypes.DEFAULT_
     # Show first 20 non-pending users (approved + own-key)
     display_users = (approved_list + key_users)[:20]
     for user in display_users:
-        username = user.get('username', 'unknown') or 'unknown'
-        if username.startswith('@'):
-            username = username[1:]
+        username = user.get('username')
+        # Handle users without username
+        if username:
+            if username.startswith('@'):
+                username = username[1:]
+            username_display = f"@{username}"
+        else:
+            username_display = "NO_USERNAME"
+
         name = user.get('name', '') or ''
         user_meals = db.get_meals_by_date_range(user['user_id'], week_start, now)
         meal_count = len(user_meals)
@@ -1925,7 +1981,7 @@ async def seealluserstats_command(update: Update, context: ContextTypes.DEFAULT_
             else:
                 last_activity = f"{days_ago} days ago"
 
-        message += f"{status} @{username} ({name})\n"
+        message += f"{status} {username_display} ({name})\n"
         message += f"   🍽 Meals (7d): {meal_count}\n"
         message += f"   🔑 Own API: {'✅' if user.get('gemini_api_key') else '❌'}\n"
         message += f"   📅 Last: {last_activity}\n\n"
@@ -1995,6 +2051,7 @@ def main():
     # Admin commands
     application.add_handler(CommandHandler('approve', approve_command))
     application.add_handler(CommandHandler('seealluserstats', seealluserstats_command))
+    application.add_handler(CommandHandler('debug', debug_command))
     application.add_handler(MessageHandler(filters.Regex(r'^/approve_\d+\b'), approve_index_command))
 
     # Message handlers
