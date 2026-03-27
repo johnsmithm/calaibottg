@@ -95,6 +95,26 @@ class Database:
             )
         ''')
 
+        # Persistent onboarding progress for partial profiles
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS onboarding_progress (
+                user_id INTEGER PRIMARY KEY,
+                username TEXT,
+                name TEXT,
+                height REAL,
+                weight REAL,
+                goal TEXT,
+                goal_speed TEXT,
+                breakfast_time TEXT,
+                lunch_time TEXT,
+                dinner_time TEXT,
+                gemini_api_key TEXT,
+                language TEXT DEFAULT 'en',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
         conn.commit()
         conn.close()
 
@@ -119,7 +139,42 @@ class Database:
     def get_all_users(self):
         conn = self.get_connection()
         cursor = conn.cursor()
-        cursor.execute('SELECT * FROM users ORDER BY created_at DESC')
+        cursor.execute('''
+            SELECT
+                user_id,
+                username,
+                name,
+                height,
+                weight,
+                goal,
+                goal_speed,
+                daily_calorie_target,
+                gemini_api_key,
+                is_approved,
+                language,
+                created_at,
+                updated_at
+            FROM users
+            UNION ALL
+            SELECT
+                p.user_id,
+                p.username,
+                p.name,
+                p.height,
+                p.weight,
+                p.goal,
+                p.goal_speed,
+                NULL AS daily_calorie_target,
+                p.gemini_api_key,
+                0 AS is_approved,
+                p.language,
+                p.created_at,
+                p.updated_at
+            FROM onboarding_progress p
+            LEFT JOIN users u ON u.user_id = p.user_id
+            WHERE u.user_id IS NULL
+            ORDER BY created_at DESC
+        ''')
         users = cursor.fetchall()
         conn.close()
         return [dict(user) for user in users]
@@ -139,6 +194,59 @@ class Database:
         user = cursor.fetchone()
         conn.close()
         return dict(user) if user else None
+
+    def save_onboarding_progress(self, user_id, **kwargs):
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        existing = self.get_onboarding_progress(user_id) or {}
+
+        allowed_fields = [
+            'username', 'name', 'height', 'weight', 'goal', 'goal_speed',
+            'breakfast_time', 'lunch_time', 'dinner_time', 'gemini_api_key', 'language'
+        ]
+        data = {field: existing.get(field) for field in allowed_fields}
+
+        for field, value in kwargs.items():
+            if field in allowed_fields:
+                data[field] = value
+
+        cursor.execute('''
+            INSERT OR REPLACE INTO onboarding_progress
+            (user_id, username, name, height, weight, goal, goal_speed, breakfast_time, lunch_time, dinner_time, gemini_api_key, language, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM onboarding_progress WHERE user_id = ?), CURRENT_TIMESTAMP), ?)
+        ''', (
+            user_id,
+            data.get('username'),
+            data.get('name'),
+            data.get('height'),
+            data.get('weight'),
+            data.get('goal'),
+            data.get('goal_speed'),
+            data.get('breakfast_time'),
+            data.get('lunch_time'),
+            data.get('dinner_time'),
+            data.get('gemini_api_key'),
+            data.get('language', 'en'),
+            user_id,
+            datetime.now(),
+        ))
+        conn.commit()
+        conn.close()
+
+    def get_onboarding_progress(self, user_id):
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM onboarding_progress WHERE user_id = ?', (user_id,))
+        progress = cursor.fetchone()
+        conn.close()
+        return dict(progress) if progress else None
+
+    def delete_onboarding_progress(self, user_id):
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('DELETE FROM onboarding_progress WHERE user_id = ?', (user_id,))
+        conn.commit()
+        conn.close()
 
     def update_user(self, user_id, **kwargs):
         conn = self.get_connection()

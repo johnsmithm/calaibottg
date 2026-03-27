@@ -48,6 +48,125 @@ NAME, HEIGHT, WEIGHT, GOAL, GOAL_SPEED, BREAKFAST_TIME, LUNCH_TIME, DINNER_TIME,
 user_onboarding_data = {}
 
 
+def get_onboarding_data(user_id):
+    """Load onboarding data from memory, falling back to persistent storage."""
+    persisted = db.get_onboarding_progress(user_id) or {}
+    cached = user_onboarding_data.get(user_id, {})
+    data = {**persisted, **cached}
+    if data:
+        user_onboarding_data[user_id] = data
+    return data
+
+
+def persist_onboarding_data(user_id, **kwargs):
+    """Persist onboarding progress to memory and database."""
+    current = get_onboarding_data(user_id)
+    current.update(kwargs)
+    user_onboarding_data[user_id] = current
+    db.save_onboarding_progress(user_id, **kwargs)
+    return current
+
+
+def clear_onboarding_data(user_id):
+    """Remove onboarding progress from memory and database."""
+    user_onboarding_data.pop(user_id, None)
+    db.delete_onboarding_progress(user_id)
+
+
+def get_next_onboarding_state(data):
+    """Return the next onboarding step based on missing persisted fields."""
+    if not data.get('name'):
+        return NAME
+    if data.get('height') is None:
+        return HEIGHT
+    if data.get('weight') is None:
+        return WEIGHT
+    if not data.get('goal'):
+        return GOAL
+    if data.get('goal') != 'maintain' and not data.get('goal_speed'):
+        return GOAL_SPEED
+    if not data.get('breakfast_time'):
+        return BREAKFAST_TIME
+    if not data.get('lunch_time'):
+        return LUNCH_TIME
+    if not data.get('dinner_time'):
+        return DINNER_TIME
+    return API_KEY
+
+
+async def send_goal_prompt(message_target):
+    keyboard = [
+        [InlineKeyboardButton("Lose Weight", callback_data="goal_lose_weight")],
+        [InlineKeyboardButton("Gain Weight", callback_data="goal_gain_weight")],
+        [InlineKeyboardButton("Maintain Weight", callback_data="goal_maintain")],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await message_target.reply_text("What's your goal?", reply_markup=reply_markup)
+
+
+async def send_goal_speed_prompt(message_target):
+    keyboard = [
+        [InlineKeyboardButton("Slow (0.25 kg/week)", callback_data="speed_slow")],
+        [InlineKeyboardButton("Moderate (0.5 kg/week)", callback_data="speed_moderate")],
+        [InlineKeyboardButton("Fast (0.75 kg/week)", callback_data="speed_fast")],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await message_target.reply_text(
+        "How fast do you want to reach your goal?",
+        reply_markup=reply_markup
+    )
+
+
+async def send_api_key_prompt(message_target):
+    await message_target.reply_text(
+        "🔑 *API Key Setup*\n\n"
+        "To use this bot, you need either:\n"
+        "1️⃣ Admin approval (contact @imosnoi)\n"
+        "2️⃣ Your own Gemini API key\n\n"
+        "If you have a Gemini API key, send it now.\n"
+        "Otherwise, send /skip and wait for admin approval.\n\n"
+        "💡 Get a free API key at:\n"
+        "https://aistudio.google.com/app/apikey",
+        parse_mode='Markdown'
+    )
+
+
+async def resume_onboarding(update: Update):
+    """Resume onboarding from the next incomplete step."""
+    user_id = update.effective_user.id
+    data = get_onboarding_data(user_id)
+    next_state = get_next_onboarding_state(data)
+
+    if next_state == NAME:
+        await update.message.reply_text(t('onboarding_welcome', 'en'))
+    elif next_state == HEIGHT:
+        await update.message.reply_text(
+            f"Welcome back, {data['name']}!\n\nWhat's your height in cm?"
+        )
+    elif next_state == WEIGHT:
+        await update.message.reply_text("What's your current weight in kg?")
+    elif next_state == GOAL:
+        await send_goal_prompt(update.message)
+    elif next_state == GOAL_SPEED:
+        await send_goal_speed_prompt(update.message)
+    elif next_state == BREAKFAST_TIME:
+        await update.message.reply_text(
+            "What time do you usually eat breakfast? (e.g., 08:00 or 8am)"
+        )
+    elif next_state == LUNCH_TIME:
+        await update.message.reply_text(
+            "What time do you usually eat lunch? (e.g., 13:00 or 1pm)"
+        )
+    elif next_state == DINNER_TIME:
+        await update.message.reply_text(
+            "What time do you usually eat dinner? (e.g., 19:00 or 7pm)"
+        )
+    else:
+        await send_api_key_prompt(update.message)
+
+    return next_state
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Start command - begins user onboarding"""
     user_id = update.effective_user.id
@@ -66,6 +185,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return ConversationHandler.END
 
+    if db.get_onboarding_progress(user_id):
+        return await resume_onboarding(update)
+
     # Start onboarding
     await update.message.reply_text(
         t('onboarding_welcome', 'en')
@@ -76,9 +198,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def get_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Get user's name"""
     user_id = update.effective_user.id
+    username = update.effective_user.username or 'unknown'
     name = update.message.text.strip()
 
-    user_onboarding_data[user_id] = {'name': name}
+    persist_onboarding_data(user_id, username=username, name=name)
 
     await update.message.reply_text(
         f"Nice to meet you, {name}! 😊\n\n"
@@ -93,7 +216,7 @@ async def get_height(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         height = float(update.message.text.strip())
-        user_onboarding_data[user_id]['height'] = height
+        persist_onboarding_data(user_id, height=height)
 
         await update.message.reply_text(
             "Great! What's your current weight in kg?"
@@ -112,19 +235,9 @@ async def get_weight(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         weight = float(update.message.text.strip())
-        user_onboarding_data[user_id]['weight'] = weight
+        persist_onboarding_data(user_id, weight=weight)
 
-        keyboard = [
-            [InlineKeyboardButton("Lose Weight", callback_data="goal_lose_weight")],
-            [InlineKeyboardButton("Gain Weight", callback_data="goal_gain_weight")],
-            [InlineKeyboardButton("Maintain Weight", callback_data="goal_maintain")],
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-
-        await update.message.reply_text(
-            "What's your goal?",
-            reply_markup=reply_markup
-        )
+        await send_goal_prompt(update.message)
         return GOAL
     except ValueError:
         await update.message.reply_text(
@@ -140,7 +253,10 @@ async def get_goal(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_id = query.from_user.id
     goal = query.data.replace('goal_', '')
-    user_onboarding_data[user_id]['goal'] = goal
+    updates = {'goal': goal}
+    if goal == 'maintain':
+        updates['goal_speed'] = 'moderate'
+    persist_onboarding_data(user_id, **updates)
 
     if goal == 'maintain':
         # Skip goal speed for maintain
@@ -170,7 +286,7 @@ async def get_goal_speed(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_id = query.from_user.id
     goal_speed = query.data.replace('speed_', '')
-    user_onboarding_data[user_id]['goal_speed'] = goal_speed
+    persist_onboarding_data(user_id, goal_speed=goal_speed)
 
     await query.edit_message_text(
         "Perfect! What time do you usually eat breakfast? (e.g., 08:00 or 8am)"
@@ -215,7 +331,7 @@ async def get_breakfast_time(update: Update, context: ContextTypes.DEFAULT_TYPE)
     try:
         time_str = update.message.text.strip()
         breakfast_time = parse_time(time_str)
-        user_onboarding_data[user_id]['breakfast_time'] = breakfast_time
+        persist_onboarding_data(user_id, breakfast_time=breakfast_time)
 
         await update.message.reply_text(
             "Got it! What time do you usually eat lunch? (e.g., 13:00 or 1pm)"
@@ -235,7 +351,7 @@ async def get_lunch_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         time_str = update.message.text.strip()
         lunch_time = parse_time(time_str)
-        user_onboarding_data[user_id]['lunch_time'] = lunch_time
+        persist_onboarding_data(user_id, lunch_time=lunch_time)
 
         await update.message.reply_text(
             "Almost done! What time do you usually eat dinner? (e.g., 19:00 or 7pm)"
@@ -255,20 +371,10 @@ async def get_dinner_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         time_str = update.message.text.strip()
         dinner_time = parse_time(time_str)
-        user_onboarding_data[user_id]['dinner_time'] = dinner_time
+        persist_onboarding_data(user_id, dinner_time=dinner_time)
 
         # Ask for API key
-        await update.message.reply_text(
-            "🔑 *API Key Setup*\n\n"
-            "To use this bot, you need either:\n"
-            "1️⃣ Admin approval (contact @imosnoi)\n"
-            "2️⃣ Your own Gemini API key\n\n"
-            "If you have a Gemini API key, send it now.\n"
-            "Otherwise, send /skip and wait for admin approval.\n\n"
-            "💡 Get a free API key at:\n"
-            "https://aistudio.google.com/app/apikey",
-            parse_mode='Markdown'
-        )
+        await send_api_key_prompt(update.message)
         return API_KEY
     except:
         await update.message.reply_text(
@@ -283,10 +389,12 @@ async def skip_api_key_command(update: Update, context: ContextTypes.DEFAULT_TYP
     username = update.effective_user.username or 'unknown'
 
     if user_id not in user_onboarding_data:
-        await update.message.reply_text("No active onboarding found. Use /start to begin.")
-        return ConversationHandler.END
-
-    data = user_onboarding_data[user_id]
+        data = get_onboarding_data(user_id)
+        if not data:
+            await update.message.reply_text("No active onboarding found. Use /start to begin.")
+            return ConversationHandler.END
+    else:
+        data = get_onboarding_data(user_id)
     goal_speed = data.get('goal_speed', 'moderate')
 
     daily_calories = calculate_daily_calorie_target(
@@ -308,13 +416,14 @@ async def skip_api_key_command(update: Update, context: ContextTypes.DEFAULT_TYP
         daily_calorie_target=daily_calories,
         gemini_api_key=None
     )
+    db.delete_onboarding_progress(user_id)
 
     # Save meal times
     db.set_meal_time(user_id, 'breakfast', data['breakfast_time'])
     db.set_meal_time(user_id, 'lunch', data['lunch_time'])
     db.set_meal_time(user_id, 'dinner', data['dinner_time'])
 
-    del user_onboarding_data[user_id]
+    user_onboarding_data.pop(user_id, None)
 
     await update.message.reply_text(
         f"✅ All set, {data['name']}!\n\n"
@@ -342,7 +451,12 @@ async def get_api_key(update: Update, context: ContextTypes.DEFAULT_TYPE):
     gemini_api_key = None if normalized in ('skip', '/skip') else api_key_input
 
     # Calculate daily calorie target
-    data = user_onboarding_data[user_id]
+    data = get_onboarding_data(user_id)
+    if not data:
+        await update.message.reply_text("No active onboarding found. Use /start to begin.")
+        return ConversationHandler.END
+
+    persist_onboarding_data(user_id, username=username, gemini_api_key=gemini_api_key)
     goal_speed = data.get('goal_speed', 'moderate')
 
     daily_calories = calculate_daily_calorie_target(
@@ -364,6 +478,7 @@ async def get_api_key(update: Update, context: ContextTypes.DEFAULT_TYPE):
         daily_calorie_target=daily_calories,
         gemini_api_key=gemini_api_key
     )
+    db.delete_onboarding_progress(user_id)
 
     # Save meal times
     db.set_meal_time(user_id, 'breakfast', data['breakfast_time'])
@@ -371,7 +486,7 @@ async def get_api_key(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db.set_meal_time(user_id, 'dinner', data['dinner_time'])
 
     # Clear onboarding data
-    del user_onboarding_data[user_id]
+    user_onboarding_data.pop(user_id, None)
 
     if gemini_api_key:
         status_msg = "✅ Your API key has been saved!"
@@ -405,8 +520,7 @@ async def get_api_key(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cancel_onboarding(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Cancel onboarding"""
     user_id = update.effective_user.id
-    if user_id in user_onboarding_data:
-        del user_onboarding_data[user_id]
+    clear_onboarding_data(user_id)
 
     await update.message.reply_text(
         "Onboarding cancelled. Use /start to begin again."
@@ -445,6 +559,12 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Check if user exists
     user = db.get_user(user_id)
     if not user:
+        if db.get_onboarding_progress(user_id):
+            await update.message.reply_text(
+                "Your onboarding is still in progress. I’m resuming from the saved step."
+            )
+            await resume_onboarding(update)
+            return
         await update.message.reply_text(
             "Please complete onboarding first with /start"
         )
@@ -682,6 +802,30 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Check if user exists
     user = db.get_user(user_id)
     if not user:
+        if db.get_onboarding_progress(user_id):
+            next_state = get_next_onboarding_state(get_onboarding_data(user_id))
+
+            if next_state == NAME:
+                return await get_name(update, context)
+            if next_state == HEIGHT:
+                return await get_height(update, context)
+            if next_state == WEIGHT:
+                return await get_weight(update, context)
+            if next_state == BREAKFAST_TIME:
+                return await get_breakfast_time(update, context)
+            if next_state == LUNCH_TIME:
+                return await get_lunch_time(update, context)
+            if next_state == DINNER_TIME:
+                return await get_dinner_time(update, context)
+            if next_state == API_KEY:
+                return await get_api_key(update, context)
+
+            await update.message.reply_text(
+                "Your onboarding is still in progress. Please use the buttons below to continue."
+            )
+            await resume_onboarding(update)
+            return
+
         await update.message.reply_text(
             "Please complete onboarding first with /start"
         )
@@ -1086,6 +1230,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_id = query.from_user.id
 
+    if query.data.startswith('goal_') and db.get_onboarding_progress(user_id):
+        return await get_goal(update, context)
+
+    if query.data.startswith('speed_') and db.get_onboarding_progress(user_id):
+        return await get_goal_speed(update, context)
+
     if query.data == 'save_meal':
         # Get pending meal
         meal = db.get_pending_meal(user_id)
@@ -1171,6 +1321,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cursor.execute('DELETE FROM meal_times WHERE user_id = ?', (user_id,))
         cursor.execute('DELETE FROM pending_meals WHERE user_id = ?', (user_id,))
         cursor.execute('DELETE FROM users WHERE user_id = ?', (user_id,))
+        cursor.execute('DELETE FROM onboarding_progress WHERE user_id = ?', (user_id,))
         conn.commit()
         conn.close()
 

@@ -289,6 +289,32 @@ class TestDatabase(unittest.TestCase):
         self.assertIn('user1', usernames)
         self.assertIn('user2', usernames)
 
+    def test_onboarding_progress_persists_partial_answers(self):
+        """Test partial onboarding data is stored before profile completion"""
+        self.db.save_onboarding_progress(33333, username='partialuser', name='Partial User')
+        self.db.save_onboarding_progress(33333, height=172, weight=68)
+
+        progress = self.db.get_onboarding_progress(33333)
+        self.assertIsNotNone(progress)
+        self.assertEqual(progress['username'], 'partialuser')
+        self.assertEqual(progress['name'], 'Partial User')
+        self.assertEqual(progress['height'], 172)
+        self.assertEqual(progress['weight'], 68)
+        self.assertIsNone(progress['goal'])
+
+    def test_get_all_users_includes_partial_onboarding_records(self):
+        """Test admin views include users who only partially completed onboarding"""
+        self.db.save_onboarding_progress(44444, username='pendinguser', name='Pending User')
+
+        users = self.db.get_all_users()
+        partial_user = next((u for u in users if u['user_id'] == 44444), None)
+
+        self.assertIsNotNone(partial_user)
+        self.assertEqual(partial_user['username'], 'pendinguser')
+        self.assertEqual(partial_user['name'], 'Pending User')
+        self.assertEqual(partial_user['is_approved'], 0)
+        self.assertIsNone(partial_user['daily_calorie_target'])
+
 
 if __name__ == '__main__':
     unittest.main()
