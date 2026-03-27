@@ -1820,13 +1820,14 @@ async def approve_index_command(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     target_user = pending[idx - 1]
-    username = (target_user.get('username') or 'unknown').replace('@', '')
+    username = target_user.get('username', 'unknown')
+    if username.startswith('@'):
+        username = username[1:]
 
     db.approve_user(target_user['user_id'])
 
     await update.message.reply_text(
-        f"✅ Approved #{idx}: *@{username}* ({target_user.get('name', '')})",
-        parse_mode='Markdown'
+        f"✅ Approved #{idx}: @{username} ({target_user.get('name', '')})"
     )
 
     try:
@@ -1995,8 +1996,15 @@ def main():
     # Button callback handler
     application.add_handler(CallbackQueryHandler(button_callback))
 
-    # Start reminder scheduler
-    scheduler = ReminderScheduler(application.bot, db)
+    # Get event loop for scheduler
+    import asyncio
+    try:
+        event_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        event_loop = asyncio.get_event_loop()
+
+    # Start reminder scheduler with event loop
+    scheduler = ReminderScheduler(application.bot, db, event_loop)
     scheduler.start()
 
     # Start bot
