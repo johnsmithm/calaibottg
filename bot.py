@@ -1881,19 +1881,22 @@ async def seealluserstats_command(update: Update, context: ContextTypes.DEFAULT_
     if pending_approval:
         message += f"⏳ <b>PENDING APPROVAL</b> ({len(pending_approval)})\n"
         for i, user in enumerate(pending_approval[:50], start=1):
-            username = html.escape(user.get('username', 'unknown') or 'unknown')
-            name = html.escape(user.get('name', '') or '')
-            cmd_link = f'<a href="tg://bot_command?command=approve_{i}">/approve_{i}</a>'
-            message += f"{i}) @{username} ({name}) — {cmd_link}\n"
+            username = user.get('username', 'unknown') or 'unknown'
+            if username.startswith('@'):
+                username = username[1:]
+            name = user.get('name', '') or ''
+            message += f"{i}. @{username} ({name}) - /approve_{i}\n"
         if len(pending_approval) > 50:
-            message += f"<i>...and {len(pending_approval) - 50} more pending</i>\n"
+            message += f"...and {len(pending_approval) - 50} more pending\n"
         message += "\n" + "=" * 30 + "\n\n"
 
     # Show first 20 non-pending users (approved + own-key)
     display_users = (approved_list + key_users)[:20]
     for user in display_users:
-        username = html.escape(user.get('username', 'unknown') or 'unknown')
-        name = html.escape(user.get('name', '') or '')
+        username = user.get('username', 'unknown') or 'unknown'
+        if username.startswith('@'):
+            username = username[1:]
+        name = user.get('name', '') or ''
         user_meals = db.get_meals_by_date_range(user['user_id'], week_start, now)
         meal_count = len(user_meals)
 
