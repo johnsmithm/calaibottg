@@ -1948,14 +1948,19 @@ async def seealluserstats_command(update: Update, context: ContextTypes.DEFAULT_
     message = "👥 *ALL USERS STATISTICS*\n\n"
 
     total_users = len(users)
-    approved_users = len([u for u in users if u.get('is_approved', 0) == 1])
-    own_key_users = len([u for u in users if u.get('gemini_api_key')])
-    pending_users = len([u for u in users if u.get('is_approved', 0) != 1 and not u.get('gemini_api_key')])
 
-    message += f"📊 Total Users: {total_users}\n"
-    message += f"✅ Approved: {approved_users}\n"
-    message += f"🔑 Own API Key: {own_key_users}\n"
-    message += f"⏳ Pending: {pending_users}\n\n"
+    # Break down by status
+    approved_no_key = [u for u in users if u.get('is_approved', 0) == 1 and not u.get('gemini_api_key')]
+    approved_with_key = [u for u in users if u.get('is_approved', 0) == 1 and u.get('gemini_api_key')]
+    pending_no_key = [u for u in users if u.get('is_approved', 0) != 1 and not u.get('gemini_api_key')]
+    pending_with_key = [u for u in users if u.get('is_approved', 0) != 1 and u.get('gemini_api_key')]
+
+    message += f"📊 Total Users: {total_users}\n\n"
+    message += f"*BREAKDOWN:*\n"
+    message += f"✅ Approved (Admin API): {len(approved_no_key)}\n"
+    message += f"✅ Approved (Own API): {len(approved_with_key)}\n"
+    message += f"⏳ Pending (Need Approval): {len(pending_no_key)}\n"
+    message += f"🔑 Pending (Own API - Auto): {len(pending_with_key)}\n\n"
 
     message += "=" * 30 + "\n\n"
 
@@ -1963,9 +1968,9 @@ async def seealluserstats_command(update: Update, context: ContextTypes.DEFAULT_
     now = datetime.now()
     week_start = now - timedelta(days=7)
 
-    pending_approval = [u for u in users if u.get('is_approved', 0) != 1 and not u.get('gemini_api_key')]
-    key_users = [u for u in users if u.get('is_approved', 0) != 1 and u.get('gemini_api_key')]
-    approved_list = [u for u in users if u.get('is_approved', 0) == 1]
+    pending_approval = pending_no_key
+    key_users = pending_with_key + approved_with_key
+    approved_list = approved_no_key
 
     if pending_approval:
         message += f"⏳ *PENDING APPROVAL* ({len(pending_approval)})\n"
