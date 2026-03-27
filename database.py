@@ -34,10 +34,18 @@ class Database:
                 daily_calorie_target REAL NOT NULL,
                 gemini_api_key TEXT,
                 is_approved INTEGER DEFAULT 0,
+                language TEXT DEFAULT 'en',
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
+
+        # Add language column if it doesn't exist (for existing databases)
+        try:
+            cursor.execute('ALTER TABLE users ADD COLUMN language TEXT DEFAULT "en"')
+            conn.commit()
+        except:
+            pass  # Column already exists
 
         # Meal times table
         cursor.execute('''
@@ -136,7 +144,7 @@ class Database:
         conn = self.get_connection()
         cursor = conn.cursor()
 
-        allowed_fields = ['name', 'height', 'weight', 'goal', 'goal_speed', 'daily_calorie_target']
+        allowed_fields = ['name', 'height', 'weight', 'goal', 'goal_speed', 'daily_calorie_target', 'language']
         updates = []
         values = []
 

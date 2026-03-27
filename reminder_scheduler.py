@@ -6,6 +6,7 @@ import asyncio
 import pytz
 import os
 from database import Database
+from translations import t, get_user_lang
 
 
 class ReminderScheduler:
@@ -28,16 +29,18 @@ class ReminderScheduler:
 
     async def _send_reminder_async(self, user_id, meal_type):
         """Async wrapper for sending reminders"""
-        messages = {
-            'breakfast': '🌅 Good morning! Time for breakfast. Send me a photo of your meal!',
-            'lunch': '🌞 Lunch time! Don\'t forget to log your meal.',
-            'dinner': '🌙 Dinner time! Remember to track your evening meal.'
-        }
-
         try:
+            # Get user's language
+            user = self.db.get_user(user_id)
+            lang = get_user_lang(user)
+
+            # Get translated message
+            message_key = f'reminder_{meal_type}'
+            message = t(message_key, lang)
+
             await self.bot.send_message(
                 chat_id=user_id,
-                text=messages.get(meal_type, 'Time to log your meal!')
+                text=message
             )
         except Exception as e:
             print(f"Error sending reminder to {user_id}: {e}")

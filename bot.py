@@ -22,6 +22,7 @@ from database import Database
 from ai_analyzer import AIAnalyzer
 from calorie_calculator import calculate_daily_calorie_target
 from reminder_scheduler import ReminderScheduler
+from translations import t, get_user_lang, SPEECH_LANG_CODES
 
 # Load environment variables
 load_dotenv()
@@ -59,21 +60,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = db.get_user(user_id)
 
     if user:
+        lang = get_user_lang(user)
         await update.message.reply_text(
-            f"Welcome back, {user['name']}! 👋\n\n"
-            "Send me a photo of your meal, voice message, or text description to track it.\n\n"
-            "Commands:\n"
-            "/stats - View your statistics\n"
-            "/settings - Update your profile\n"
-            "/help - Get help"
+            t('welcome_back', lang, name=user['name'])
         )
         return ConversationHandler.END
 
     # Start onboarding
     await update.message.reply_text(
-        "👋 Welcome to Calorie Tracker Bot!\n\n"
-        "I'll help you track your nutrition and reach your goals.\n\n"
-        "Let's get started! What's your name?"
+        t('onboarding_welcome', 'en')
     )
     return NAME
 
@@ -535,7 +530,8 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    await update.message.reply_text("🎤 Processing your voice message...")
+    lang = get_user_lang(user)
+    await update.message.reply_text(t('processing_voice', lang))
 
     try:
         # Download voice file
@@ -553,11 +549,12 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         wav_path = voice_path.replace('.ogg', '.wav')
         audio.export(wav_path, format="wav")
 
-        # Transcribe
+        # Transcribe using user's language
+        lang_code = SPEECH_LANG_CODES.get(get_user_lang(user), 'en-US')
         recognizer = sr.Recognizer()
         with sr.AudioFile(wav_path) as source:
             audio_data = recognizer.record(source)
-            text = recognizer.recognize_google(audio_data)
+            text = recognizer.recognize_google(audio_data, language=lang_code)
 
         # Clean up
         os.remove(voice_path)
@@ -628,6 +625,10 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Otherwise, treat as meal logging
         meal_data, usage = ai.analyze_text_meal(text)
 
+        # Ensure meal_type is set (fallback to 'snack' if not provided)
+        if 'meal_type' not in meal_data or not meal_data['meal_type']:
+            meal_data['meal_type'] = 'snack'
+
         # Save to pending meals
         db.save_pending_meal(user_id, meal_data)
 
@@ -664,19 +665,13 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     except sr.UnknownValueError:
         logger.error(f"Speech recognition could not understand audio for user {user_id}")
-        await update.message.reply_text(
-            "❌ Sorry, I couldn't understand the audio. Please try speaking more clearly."
-        )
+        await update.message.reply_text(t('error_voice_unclear', lang))
     except sr.RequestError as e:
         logger.error(f"Speech recognition service error for user {user_id}: {e}")
-        await update.message.reply_text(
-            "❌ Sorry, there was an error with the speech recognition service. Please try again later."
-        )
+        await update.message.reply_text(t('error_voice_service', lang))
     except Exception as e:
         logger.error(f"Error processing voice for user {user_id}: {e}", exc_info=True)
-        await update.message.reply_text(
-            f"❌ Sorry, I couldn't process your voice message. Error: {str(e)}\n\nPlease try again or send a text/photo instead."
-        )
+        await update.message.reply_text(t('error_voice_generic', lang, error=str(e)))
 
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -986,12 +981,17 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             meal_data, usage = ai.analyze_text_meal(text)
 
+            # Ensure meal_type is set (fallback to 'snack' if not provided)
+            if 'meal_type' not in meal_data or not meal_data['meal_type']:
+                meal_data['meal_type'] = 'snack'
+
             # Save to pending meals
             db.save_pending_meal(user_id, meal_data)
 
-            # Send results with save/cancel buttons
+            # Send results with save/edit/cancel buttons
             keyboard = [
                 [InlineKeyboardButton("✅ Save", callback_data="save_meal")],
+                [InlineKeyboardButton("✏️ Edit Calories", callback_data="edit_calories")],
                 [InlineKeyboardButton("❌ Cancel", callback_data="cancel_meal")],
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
@@ -1181,6 +1181,16 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif query.data == 'cancel_reset':
         await query.edit_message_text("❌ Reset cancelled. Your data is safe.")
+
+    elif query.data.startswith('lang_'):
+        # Language selection
+        lang_code = query.data.split('_')[1]  # Extract 'en', 'ro', or 'ru'
+
+        # Update user language
+        db.update_user(user_id, language=lang_code)
+
+        # Get confirmation message in the new language
+        await query.edit_message_text(t('language_changed', lang_code))
 
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1629,6 +1639,30 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(help_text, parse_mode='Markdown')
 
 
+async def lang_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Language selection command"""
+    user_id = update.effective_user.id
+    user = db.get_user(user_id)
+
+    if not user:
+        await update.message.reply_text("Please complete onboarding first with /start")
+        return
+
+    # Create language selection keyboard
+    keyboard = [
+        [InlineKeyboardButton("🇬🇧 English", callback_data="lang_en")],
+        [InlineKeyboardButton("🇷🇴 Română", callback_data="lang_ro")],
+        [InlineKeyboardButton("🇷🇺 Русский", callback_data="lang_ru")],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    lang = get_user_lang(user)
+    await update.message.reply_text(
+        t('select_language', lang),
+        reply_markup=reply_markup
+    )
+
+
 async def yesterday_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show yesterday's stats in Instagram-ready format"""
     user_id = update.effective_user.id
@@ -1946,6 +1980,7 @@ def main():
     application.add_handler(CommandHandler('reminders', reminders_command))
     application.add_handler(CommandHandler('stats', stats_command))
     application.add_handler(CommandHandler('help', help_command))
+    application.add_handler(CommandHandler('lang', lang_command))
 
     # Admin commands
     application.add_handler(CommandHandler('approve', approve_command))
