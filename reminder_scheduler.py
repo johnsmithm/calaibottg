@@ -16,7 +16,15 @@ class ReminderScheduler:
 
     def send_reminder(self, user_id, meal_type):
         """Send meal reminder to user"""
-        asyncio.create_task(self._send_reminder_async(user_id, meal_type))
+        # Get the running event loop and schedule the coroutine
+        try:
+            loop = asyncio.get_event_loop()
+            asyncio.run_coroutine_threadsafe(
+                self._send_reminder_async(user_id, meal_type),
+                loop
+            )
+        except Exception as e:
+            print(f"Error scheduling reminder for user {user_id}: {e}")
 
     async def _send_reminder_async(self, user_id, meal_type):
         """Async wrapper for sending reminders"""

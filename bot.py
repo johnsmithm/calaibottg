@@ -41,7 +41,7 @@ db = Database()
 ai = AIAnalyzer()
 
 # Conversation states
-NAME, HEIGHT, WEIGHT, GOAL, GOAL_SPEED, BREAKFAST_TIME, LUNCH_TIME, DINNER_TIME, API_KEY = range(9)
+NAME, HEIGHT, WEIGHT, GOAL, GOAL_SPEED, BREAKFAST_TIME, LUNCH_TIME, DINNER_TIME, API_KEY, EDIT_CALORIES = range(10)
 
 # User data storage for onboarding
 user_onboarding_data = {}
@@ -488,9 +488,10 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Save to pending meals
         db.save_pending_meal(user_id, meal_data)
 
-        # Send results with save/cancel buttons
+        # Send results with save/edit/cancel buttons
         keyboard = [
             [InlineKeyboardButton("✅ Save", callback_data="save_meal")],
+            [InlineKeyboardButton("✏️ Edit Calories", callback_data="edit_calories")],
             [InlineKeyboardButton("❌ Cancel", callback_data="cancel_meal")],
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -630,9 +631,10 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Save to pending meals
         db.save_pending_meal(user_id, meal_data)
 
-        # Send results with save/cancel buttons
+        # Send results with save/edit/cancel buttons
         keyboard = [
             [InlineKeyboardButton("✅ Save", callback_data="save_meal")],
+            [InlineKeyboardButton("✏️ Edit Calories", callback_data="edit_calories")],
             [InlineKeyboardButton("❌ Cancel", callback_data="cancel_meal")],
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -660,10 +662,20 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=reply_markup
         )
 
-    except Exception as e:
-        logger.error(f"Error processing voice: {e}")
+    except sr.UnknownValueError:
+        logger.error(f"Speech recognition could not understand audio for user {user_id}")
         await update.message.reply_text(
-            "❌ Sorry, I couldn't process your voice message. Please try again."
+            "❌ Sorry, I couldn't understand the audio. Please try speaking more clearly."
+        )
+    except sr.RequestError as e:
+        logger.error(f"Speech recognition service error for user {user_id}: {e}")
+        await update.message.reply_text(
+            "❌ Sorry, there was an error with the speech recognition service. Please try again later."
+        )
+    except Exception as e:
+        logger.error(f"Error processing voice for user {user_id}: {e}", exc_info=True)
+        await update.message.reply_text(
+            f"❌ Sorry, I couldn't process your voice message. Error: {str(e)}\n\nPlease try again or send a text/photo instead."
         )
 
 
@@ -679,6 +691,118 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Please complete onboarding first with /start"
         )
         return
+
+    # Check if we're awaiting a calorie edit
+    if context.user_data.get('awaiting_calorie_edit'):
+        context.user_data['awaiting_calorie_edit'] = False
+
+        # Get pending meal
+        meal = db.get_pending_meal(user_id)
+
+        if not meal:
+            await update.message.reply_text("❌ No pending meal found. Please send a new photo or voice message.")
+            return
+
+        # Try to extract calorie value or use AI to re-analyze with user feedback
+        import re
+        calorie_match = re.search(r'(\d+)\s*(?:kcal)?', text, re.IGNORECASE)
+
+        if calorie_match:
+            # User provided a simple number
+            new_calories = int(calorie_match.group(1))
+            old_calories = meal['calories']
+
+            # Recalculate macros proportionally
+            if old_calories > 0:
+                ratio = new_calories / old_calories
+                meal['protein'] = round(meal['protein'] * ratio, 1)
+                meal['carbs'] = round(meal['carbs'] * ratio, 1)
+                meal['fat'] = round(meal['fat'] * ratio, 1)
+                meal['fiber'] = round(meal['fiber'] * ratio, 1)
+                meal['sugar'] = round(meal['sugar'] * ratio, 1)
+
+            # Update calories
+            meal['calories'] = new_calories
+
+            # Update pending meal
+            db.save_pending_meal(user_id, meal)
+
+            keyboard = [
+                [InlineKeyboardButton("✅ Save", callback_data="save_meal")],
+                [InlineKeyboardButton("✏️ Edit Again", callback_data="edit_calories")],
+                [InlineKeyboardButton("❌ Cancel", callback_data="cancel_meal")],
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+
+            message = f"✅ *Updated Nutritional Information:*\n\n"
+            message += f"🍽 {meal['description']}\n"
+            message += f"🍴 Meal Type: {meal['meal_type'].title()}\n\n"
+            message += f"⚡️ Calories: {meal['calories']} kcal\n"
+            message += f"🥩 Protein: {meal['protein']}g\n"
+            message += f"🍞 Carbs: {meal['carbs']}g\n"
+            message += f"🥑 Fat: {meal['fat']}g\n"
+            message += f"🌾 Fiber: {meal['fiber']}g\n"
+            message += f"🍬 Sugar: {meal['sugar']}g\n\n"
+            message += f"Save this meal?"
+
+            await update.message.reply_text(
+                message,
+                parse_mode='Markdown',
+                reply_markup=reply_markup
+            )
+            return
+        else:
+            # User provided description/correction - use AI to re-analyze
+            await update.message.reply_text("🔍 Re-analyzing with your feedback...")
+
+            try:
+                # Use user's API key if they have one
+                if user.get('gemini_api_key'):
+                    user_ai = AIAnalyzer(api_key=user['gemini_api_key'])
+                    correction_prompt = f"Original meal: {meal['description']}\nUser correction: {text}\n\nProvide updated nutritional information."
+                    updated_meal, usage = user_ai.analyze_text_meal(correction_prompt)
+                else:
+                    correction_prompt = f"Original meal: {meal['description']}\nUser correction: {text}\n\nProvide updated nutritional information."
+                    updated_meal, usage = ai.analyze_text_meal(correction_prompt)
+
+                # Preserve image path and update description
+                updated_meal['image_path'] = meal.get('image_path')
+                updated_meal['description'] = f"{meal['description']} (corrected: {text})"
+
+                # Update pending meal
+                db.save_pending_meal(user_id, updated_meal)
+
+                keyboard = [
+                    [InlineKeyboardButton("✅ Save", callback_data="save_meal")],
+                    [InlineKeyboardButton("✏️ Edit Again", callback_data="edit_calories")],
+                    [InlineKeyboardButton("❌ Cancel", callback_data="cancel_meal")],
+                ]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+
+                message = f"✅ *Updated Nutritional Information:*\n\n"
+                message += f"🍽 {updated_meal['description']}\n"
+                message += f"🍴 Meal Type: {updated_meal['meal_type'].title()}\n\n"
+                message += f"⚡️ Calories: {updated_meal['calories']} kcal\n"
+                message += f"🥩 Protein: {updated_meal['protein']}g\n"
+                message += f"🍞 Carbs: {updated_meal['carbs']}g\n"
+                message += f"🥑 Fat: {updated_meal['fat']}g\n"
+                message += f"🌾 Fiber: {updated_meal['fiber']}g\n"
+                message += f"🍬 Sugar: {updated_meal['sugar']}g\n\n"
+                message += f"💡 AI Usage: {usage['total_tokens']:,} tokens (${usage['cost_usd']:.6f})\n\n"
+                message += f"Save this meal?"
+
+                await update.message.reply_text(
+                    message,
+                    parse_mode='Markdown',
+                    reply_markup=reply_markup
+                )
+                return
+            except Exception as e:
+                logger.error(f"Error re-analyzing meal: {e}")
+                await update.message.reply_text(
+                    "❌ Sorry, I couldn't re-analyze the meal. Please try entering just a calorie number."
+                )
+                return
 
     # Use AI to understand user intent
     intent = ai.parse_user_intent(text, user)
@@ -1016,6 +1140,28 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == 'cancel_meal':
         db.delete_pending_meal(user_id)
         await query.edit_message_text("❌ Meal cancelled.")
+
+    elif query.data == 'edit_calories':
+        # Get pending meal
+        meal = db.get_pending_meal(user_id)
+
+        if meal:
+            await query.edit_message_text(
+                f"Current calories: *{meal['calories']} kcal*\n\n"
+                f"Please send the corrected calorie value.\n\n"
+                f"You can also mention:\n"
+                f"• What's in the photo if AI missed something\n"
+                f"• Portion size if different (e.g., 'actually 200g chicken')\n\n"
+                f"Examples:\n"
+                f"• 450\n"
+                f"• 450 kcal\n"
+                f"• It's 300g chicken breast not 150g",
+                parse_mode='Markdown'
+            )
+            # Store that we're waiting for calorie edit
+            context.user_data['awaiting_calorie_edit'] = True
+        else:
+            await query.edit_message_text("❌ No pending meal found.")
 
     elif query.data == 'confirm_reset':
         # Delete all user data
