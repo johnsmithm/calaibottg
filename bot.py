@@ -1844,7 +1844,9 @@ async def approve_index_command(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin debug command to see recent user profiles"""
+    """Admin debug command to see recent user profiles
+    Usage: /debug [weight=65] [name=john] [approved=0]
+    """
     user_id = update.effective_user.id
 
     if user_id != ADMIN_USER_ID:
@@ -1857,10 +1859,51 @@ async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("No users found in database.")
         return
 
-    # Sort by created_at descending (newest first)
-    sorted_users = sorted(users, key=lambda u: u.get('created_at', ''), reverse=True)[:10]
+    # Parse filter arguments
+    args = context.args
+    filtered_users = users
 
-    message = "🔍 *DEBUG - Last 10 Users Created*\n\n"
+    if args:
+        for arg in args:
+            if '=' in arg:
+                key, value = arg.split('=', 1)
+                key = key.lower().strip()
+                value = value.strip()
+
+                if key == 'weight':
+                    try:
+                        weight_filter = float(value)
+                        filtered_users = [u for u in filtered_users if u.get('weight') == weight_filter]
+                    except ValueError:
+                        pass
+                elif key == 'height':
+                    try:
+                        height_filter = float(value)
+                        filtered_users = [u for u in filtered_users if u.get('height') == height_filter]
+                    except ValueError:
+                        pass
+                elif key == 'name':
+                    filtered_users = [u for u in filtered_users if value.lower() in (u.get('name', '') or '').lower()]
+                elif key == 'approved':
+                    approved_filter = 1 if value.lower() in ['1', 'true', 'yes'] else 0
+                    filtered_users = [u for u in filtered_users if u.get('is_approved', 0) == approved_filter]
+                elif key == 'id':
+                    try:
+                        id_filter = int(value)
+                        filtered_users = [u for u in filtered_users if u.get('user_id') == id_filter]
+                    except ValueError:
+                        pass
+
+    # Sort by created_at descending (newest first) and limit to 10
+    sorted_users = sorted(filtered_users, key=lambda u: u.get('created_at', ''), reverse=True)[:10]
+
+    if not sorted_users:
+        await update.message.reply_text("No users found matching the filters.")
+        return
+
+    filter_text = f" (Filters: {' '.join(args)})" if args else ""
+    message = f"🔍 *DEBUG - Users{filter_text}*\n"
+    message += f"Found: {len(filtered_users)} | Showing: {len(sorted_users)}\n\n"
 
     for i, user in enumerate(sorted_users, 1):
         user_id_val = user.get('user_id', 'N/A')
