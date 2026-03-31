@@ -552,6 +552,32 @@ def format_meal_message(meal_data):
     return message
 
 
+async def send_text_in_chunks(message_target, text, chunk_size=3500):
+    """Send long plain-text messages without exceeding Telegram limits."""
+    if len(text) <= chunk_size:
+        await message_target.reply_text(text, disable_web_page_preview=True)
+        return
+
+    chunks = []
+    remaining = text
+
+    while len(remaining) > chunk_size:
+        split_at = remaining.rfind("\n\n", 0, chunk_size)
+        if split_at == -1:
+            split_at = remaining.rfind("\n", 0, chunk_size)
+        if split_at == -1:
+            split_at = chunk_size
+
+        chunks.append(remaining[:split_at].rstrip())
+        remaining = remaining[split_at:].lstrip()
+
+    if remaining:
+        chunks.append(remaining)
+
+    for chunk in chunks:
+        await message_target.reply_text(chunk, disable_web_page_preview=True)
+
+
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle photo uploads"""
     user_id = update.effective_user.id
@@ -2110,7 +2136,7 @@ async def seealluserstats_command(update: Update, context: ContextTypes.DEFAULT_
         await update.message.reply_text("No users found.")
         return
 
-    message = "👥 *ALL USERS STATISTICS*\n\n"
+    message = "👥 ALL USERS STATISTICS\n\n"
 
     total_users = len(users)
 
@@ -2121,7 +2147,7 @@ async def seealluserstats_command(update: Update, context: ContextTypes.DEFAULT_
     pending_with_key = [u for u in users if u.get('is_approved', 0) != 1 and u.get('gemini_api_key')]
 
     message += f"📊 Total Users: {total_users}\n\n"
-    message += f"*BREAKDOWN:*\n"
+    message += "BREAKDOWN:\n"
     message += f"✅ Approved (Admin API): {len(approved_no_key)}\n"
     message += f"✅ Approved (Own API): {len(approved_with_key)}\n"
     message += f"⏳ Pending (Need Approval): {len(pending_no_key)}\n"
@@ -2138,7 +2164,7 @@ async def seealluserstats_command(update: Update, context: ContextTypes.DEFAULT_
     approved_list = approved_no_key
 
     if pending_approval:
-        message += f"⏳ *PENDING APPROVAL* ({len(pending_approval)})\n"
+        message += f"⏳ PENDING APPROVAL ({len(pending_approval)})\n"
         for i, user in enumerate(pending_approval[:50], start=1):
             username = user.get('username')
             # Handle users without username
@@ -2156,7 +2182,7 @@ async def seealluserstats_command(update: Update, context: ContextTypes.DEFAULT_
             message += f"...and {len(pending_approval) - 50} more pending\n"
         message += "\n" + "=" * 30 + "\n\n"
     else:
-        message += "⏳ *PENDING APPROVAL*: None\n\n"
+        message += "⏳ PENDING APPROVAL: None\n\n"
         message += "=" * 30 + "\n\n"
 
     # Show first 20 non-pending users (approved + own-key)
@@ -2201,13 +2227,9 @@ async def seealluserstats_command(update: Update, context: ContextTypes.DEFAULT_
 
     remaining = len(approved_list + key_users) - len(display_users)
     if remaining > 0:
-        message += f"\n_...and {remaining} more users_"
+        message += f"\n...and {remaining} more users"
 
-    await update.message.reply_text(
-        message,
-        parse_mode='Markdown',
-        disable_web_page_preview=True,
-    )
+    await send_text_in_chunks(update.message, message)
 
 
 def main():
