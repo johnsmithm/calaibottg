@@ -9,13 +9,33 @@ class AIAnalyzer:
     # Output: $0.30 per 1M tokens
     COST_PER_1M_INPUT_TOKENS = 0.075
     COST_PER_1M_OUTPUT_TOKENS = 0.30
+    MODEL_NAME = 'gemini-2.5-flash'
 
     def __init__(self, api_key=None):
         if api_key:
             genai.configure(api_key=api_key)
         else:
             genai.configure(api_key=os.getenv('GOOGLE_AI_API_KEY'))
-        self.model = genai.GenerativeModel('gemini-2.5-flash')
+        self.model = genai.GenerativeModel(self.MODEL_NAME)
+
+    @staticmethod
+    def validate_api_key(api_key):
+        """Verify a Gemini API key with a minimal generation request."""
+        try:
+            genai.configure(api_key=api_key)
+            model = genai.GenerativeModel(AIAnalyzer.MODEL_NAME)
+            response = model.generate_content("Reply with OK")
+            text = (getattr(response, 'text', '') or '').strip()
+            return True, text or "OK"
+        except Exception as e:
+            error_text = str(e)
+
+            if 'API_KEY_INVALID' in error_text or 'API key not valid' in error_text:
+                return False, "invalid"
+            if 'RESOURCE_EXHAUSTED' in error_text or 'quota' in error_text.lower():
+                return False, "quota_exceeded"
+
+            return False, error_text
 
     def _calculate_cost(self, input_tokens, output_tokens):
         """Calculate estimated cost in USD"""

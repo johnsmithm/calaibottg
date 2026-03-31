@@ -450,11 +450,33 @@ async def get_api_key(update: Update, context: ContextTypes.DEFAULT_TYPE):
     normalized = api_key_input.strip().lower()
     gemini_api_key = None if normalized in ('skip', '/skip') else api_key_input
 
-    # Calculate daily calorie target
     data = get_onboarding_data(user_id)
     if not data:
         await update.message.reply_text("No active onboarding found. Use /start to begin.")
         return ConversationHandler.END
+
+    if gemini_api_key:
+        await update.message.reply_text("🔍 Checking your Gemini API key...")
+        is_valid, validation_result = AIAnalyzer.validate_api_key(gemini_api_key)
+
+        if not is_valid:
+            if validation_result == 'invalid':
+                await update.message.reply_text(
+                    "❌ That Gemini API key is not valid.\n\n"
+                    "Please send a valid key, or send /skip to wait for admin approval."
+                )
+            elif validation_result == 'quota_exceeded':
+                await update.message.reply_text(
+                    "⚠️ That Gemini API key is valid, but it has no quota available right now.\n\n"
+                    "Please send a different key, or send /skip to wait for admin approval."
+                )
+            else:
+                await update.message.reply_text(
+                    "❌ I could not verify that Gemini API key.\n\n"
+                    f"Error: {validation_result}\n\n"
+                    "Please try again with a valid key, or send /skip to wait for admin approval."
+                )
+            return API_KEY
 
     persist_onboarding_data(user_id, username=username, gemini_api_key=gemini_api_key)
     goal_speed = data.get('goal_speed', 'moderate')
@@ -489,7 +511,7 @@ async def get_api_key(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_onboarding_data.pop(user_id, None)
 
     if gemini_api_key:
-        status_msg = "✅ Your API key has been saved!"
+        status_msg = "✅ Your API key works and has been saved!"
         instructions = (
             "📸 Send me a photo of your meal to get started!\n"
             "🎤 You can also send voice messages or text descriptions.\n\n"
@@ -578,6 +600,18 @@ async def send_text_in_chunks(message_target, text, chunk_size=3500):
         await message_target.reply_text(chunk, disable_web_page_preview=True)
 
 
+def classify_gemini_error(error):
+    """Classify common Gemini API failures from exception text."""
+    text = str(error)
+
+    if 'API_KEY_INVALID' in text or 'API key not valid' in text:
+        return 'invalid_api_key'
+    if 'RESOURCE_EXHAUSTED' in text or 'quota' in text.lower():
+        return 'quota_exceeded'
+
+    return None
+
+
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle photo uploads"""
     user_id = update.effective_user.id
@@ -617,10 +651,59 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         photo_path = f"photos/{user_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
         await photo_file.download_to_drive(photo_path)
 
-        # Use user's API key if they have one
-        if user.get('gemini_api_key'):
-            user_ai = AIAnalyzer(api_key=user['gemini_api_key'])
-            meal_data, usage = user_ai.analyze_food_image(photo_path)
+        # Approved users should prefer the shared key, then fall back to their own key.
+        if user.get('is_approved'):
+            try:
+                meal_data, usage = ai.analyze_food_image(photo_path)
+            except Exception as shared_key_error:
+                logger.warning(
+                    f"Shared Gemini analysis failed for user {user_id}; trying personal key. Error: {shared_key_error}"
+                )
+
+                if not user.get('gemini_api_key'):
+                    raise
+
+                try:
+                    user_ai = AIAnalyzer(api_key=user['gemini_api_key'])
+                    meal_data, usage = user_ai.analyze_food_image(photo_path)
+                except Exception as user_key_error:
+                    error_kind = classify_gemini_error(user_key_error)
+
+                    if error_kind == 'invalid_api_key':
+                        await update.message.reply_text(
+                            "❌ The shared analyzer failed, and your saved Gemini API key is invalid.\n\n"
+                            "Please run /start and enter a valid Gemini API key."
+                        )
+                        return
+                    if error_kind == 'quota_exceeded':
+                        await update.message.reply_text(
+                            "❌ The shared analyzer failed, and your Gemini API key has run out of quota.\n\n"
+                            "Please use a key with available quota."
+                        )
+                        return
+
+                    raise
+        elif user.get('gemini_api_key'):
+            try:
+                user_ai = AIAnalyzer(api_key=user['gemini_api_key'])
+                meal_data, usage = user_ai.analyze_food_image(photo_path)
+            except Exception as user_key_error:
+                error_kind = classify_gemini_error(user_key_error)
+
+                if error_kind == 'invalid_api_key':
+                    await update.message.reply_text(
+                        "❌ Your saved Gemini API key is invalid.\n\n"
+                        "Please run /start and enter a valid Gemini API key, or ask the admin to approve your account."
+                    )
+                    return
+                if error_kind == 'quota_exceeded':
+                    await update.message.reply_text(
+                        "❌ Your Gemini API key has run out of quota.\n\n"
+                        "Please use a key with available quota, or ask the admin to approve your account."
+                    )
+                    return
+
+                raise
         else:
             meal_data, usage = ai.analyze_food_image(photo_path)
 
